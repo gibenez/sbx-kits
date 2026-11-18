@@ -1,0 +1,70 @@
+schemaVersion: "2"
+kind: sandbox
+name: pi
+displayName: Pi
+description: Minimal terminal coding agent with extensible tools, skills, and TUI
+sandbox:
+  image: docker.io/sbx/pi-image:latest
+  entrypoint:
+    - bash
+# agentInstructions:
+#   filename: AGENTS.md
+permissions:
+  network:
+    allow:
+      - "${{ kit.args.llmapi_domain }}"
+      # pi's runtime package installs (extensions, skills, prompt templates,
+      # themes) and the packages named in settings, fetched on startup.
+      - registry.npmjs.org
+      # Mirror APT necessari durante setup.install per openssh-server
+      - archive.ubuntu.com
+      - security.ubuntu.com
+      - ports.ubuntu.com
+      - deb.debian.org
+ports:
+  - container: 22
+    protocol: tcp
+    name: ssh
+credentials:
+  - service: llmapi
+    apiKey:
+      name: LLMAPI_API_KEY
+      proxyManaged: true
+      inject:
+        # pi only sends x-api-key to api.anthropic.com; no other host needs
+        # the key, so no other host gets it.
+        - domain: "${{ kit.args.llmapi_domain }}"
+          header: Authorization
+          format: 'Bearer %s'
+setup:
+  install:
+    # dev tools and skills
+    - command: npx -y skills@latest add mattpocock/skills -g -y $(curl -s https://raw.githubusercontent.com/mattpocock/skills/main/.claude-plugin/plugin.json | jq -r '.skills[] | split("/") | last' | xargs -n1 printf -- '-s %s ')
+      user: "1000"
+      description: Install Matt Pocock Skills
+    - command: npx -y skills@latest add https://github.com/only-cli/oc -g -y --skill web-browsing-cli
+      user: "1000"
+      description: Install OnlyCli Skill
+    - command: npm install -g @playwright/cli@latest
+      user: "1000"
+      description: Install Playwright
+    - command: playwright-cli install --skills agents --global
+      user: "1000"
+      description: Install Playwright Skills
+    # ssh server
+    - command: |
+        DEBIAN_FRONTEND=noninteractive apt-get update -o DPkg::Lock::Timeout=120 && \
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssh-server && \
+        mkdir -p /run/sshd /etc/ssh/sshd_config.d && \
+        ssh-keygen -A && \
+        printf 'PasswordAuthentication yes\nKbdInteractiveAuthentication yes\nPermitRootLogin no\n' > /etc/ssh/sshd_config.d/99-password-auth.conf && \
+        echo 'agent:12345' | chpasswd
+      user: "0"
+      description: Install and configure OpenSSH server
+  startup:
+    - command:
+        - sh
+        - -c
+        - mkdir -p /run/sshd && (pgrep -x sshd >/dev/null || /usr/sbin/sshd)
+      user: "0"
+      description: Start OpenSSH daemon

@@ -1,0 +1,26 @@
+{
+  "providers": {
+    "main": {
+      "baseUrl": "https://${{ kit.args.llmapi_domain }}",
+      "api": "anthropic-messages",
+      "apiKey": "xxx",
+      "models": [
+        {
+          "id": "Swift-1.5-Qwen3.8-27B-Q6_K_L",
+          "reasoning": true,
+          "contextWindow": 262144
+        },
+        {
+          "id": "gpt-6.1-sol",
+          "reasoning": true,
+          "contextWindow": 500000
+        },
+        {
+          "id": "claude-opus-5-5",
+          "reasoning": true,
+          "contextWindow": 500000
+        }
+      ]
+    }
+  }
+}
