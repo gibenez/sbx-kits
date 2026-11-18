@@ -19,3 +19,7 @@ sbx run git+https://github.com/gibenez/sbx-kits.git#dir=pi-dev --kit-arg llmapi_
 ```bash
 sbx port publish pi-workspace 2222:22
 ```
+### Connect to the SSH server
+```bash
+ssh agent@localhost -p 2222
+```
