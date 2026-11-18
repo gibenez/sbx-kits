@@ -69,8 +69,21 @@ setup:
       description: Install and configure OpenSSH server
   startup:
     - command:
-        - sh
+        - bash
         - -c
-        - mkdir -p /run/sshd && (pgrep -x sshd >/dev/null || /usr/sbin/sshd)
+        - |
+          mkdir -p /run/sshd && (pgrep -x sshd >/dev/null || /usr/sbin/sshd)
+          VARS_REGEX='^(HTTP_PROXY|HTTPS_PROXY|NO_PROXY|http_proxy|https_proxy|no_proxy|SSL_CERT_FILE|NODE_EXTRA_CA_CERTS|NODE_USE_ENV_PROXY|PROXY_CA_CERT_B64|LLMAPI_API_KEY)='
+          grep -vE "$VARS_REGEX" /etc/environment 2>/dev/null > /etc/environment.tmp || true
+          : > /etc/profile.d/sbx-env.sh
+          (env; tr '\0' '\n' < /proc/1/environ 2>/dev/null) \
+            | grep -E "$VARS_REGEX" \
+            | awk -F= '!seen[$1]++' \
+            | while IFS='=' read -r k v; do
+                printf '%s="%s"\n' "$k" "$v" >> /etc/environment.tmp
+                printf 'export %s="%s"\n' "$k" "$v" >> /etc/profile.d/sbx-env.sh
+              done
+          mv -f /etc/environment.tmp /etc/environment
+          chmod 644 /etc/environment /etc/profile.d/sbx-env.sh
       user: "0"
-      description: Start OpenSSH daemon
+      description: Start OpenSSH daemon and export sbx proxy/CA/credential variables
