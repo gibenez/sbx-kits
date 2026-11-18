@@ -3,6 +3,12 @@ kind: sandbox
 name: pi
 displayName: Pi
 description: Minimal terminal coding agent with extensible tools, skills, and TUI
+
+args:
+  llmapi_domain:
+    required: true
+    description: "LLM service API domain"
+
 sandbox:
   image: docker.io/sbx/pi-image:latest
   entrypoint:
