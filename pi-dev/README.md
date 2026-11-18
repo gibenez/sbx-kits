@@ -15,3 +15,7 @@ sbx secret set llmapi
 ```bash
 sbx run git+https://github.com/gibenez/sbx-kits.git#dir=pi-dev --kit-arg llmapi_domain="your.llmapi.domain"
 ```
+### Publish SSH port
+```bash
+sbx port publish pi-workspace 2222:22
+```
