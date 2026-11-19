@@ -8,17 +8,20 @@
         {
           "id": "Swift-1.5-Qwen3.8-27B-Q6_K_L",
           "reasoning": true,
-          "contextWindow": 262144
+          "contextWindow": 262144,
+          "input": ["text", "image"]
         },
         {
           "id": "gpt-6.1-sol",
           "reasoning": true,
-          "contextWindow": 500000
+          "contextWindow": 500000,
+          "input": ["text", "image"]
         },
         {
           "id": "claude-opus-5-5",
           "reasoning": true,
-          "contextWindow": 500000
+          "contextWindow": 500000,
+          "input": ["text", "image"]
         }
       ]
     }
