@@ -16,5 +16,5 @@ sbx run "git+https://github.com/gibenez/sbx-kits.git#dir=pi-dev" --kit-arg llmap
 ```
 ### Use it in your ADE or agent orchestrator
 ```bash
-sbx run "git+https://github.com/gibenez/sbx-kits.git#dir=pi-dev" --kit-arg llmapi_domain="your.llmapi.domain" . /var/folders/_j
+sbx run "git+https://github.com/gibenez/sbx-kits.git#dir=pi-dev" --kit-arg llmapi_domain="your.llmapi.domain" . /var/folders/_j || sbx run --name pi-$(basename $PWD)
 ```
