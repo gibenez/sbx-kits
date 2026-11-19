@@ -4,7 +4,6 @@ A sanbox development kit based on pi agent, with
 - Matt Pocock's skills
 - only-cli/oc web-browsing-cli skill
 - Playwright cli and its skills
-- [insecure] ssh server to allow easy access from IDEs on the same network (e.g. VSCode, JetBrains Gateway, etc.)
 
 ## Run
 ### Set the llmapi API key
@@ -13,13 +12,9 @@ sbx secret set llmapi
 ```
 ### Run sandbox with the pi-dev kit
 ```bash
-sbx run git+https://github.com/gibenez/sbx-kits.git#dir=pi-dev --kit-arg llmapi_domain="your.llmapi.domain"
+sbx run "git+https://github.com/gibenez/sbx-kits.git#dir=pi-dev" --kit-arg llmapi_domain="your.llmapi.domain"
 ```
-### Publish SSH port
+### Use it in your ADE or agent orchestrator
 ```bash
-sbx port publish pi-workspace 2222:22
-```
-### Connect to the SSH server
-```bash
-ssh agent@localhost -p 2222
+sbx run "git+https://github.com/gibenez/sbx-kits.git#dir=pi-dev" --kit-arg llmapi_domain="your.llmapi.domain" . /var/folders/_j
 ```
