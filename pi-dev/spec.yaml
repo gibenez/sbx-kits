@@ -285,6 +285,46 @@ setup:
           except (ValueError, TypeError):
               sys.exit("sbx: could not decode the resolved Compose configuration")
 
+          def configure_service_no_proxy(model, inherited):
+              # Only bypass names reachable on a service's own Compose networks.
+              # Never add a wildcard, subnet, or unrelated service name. Preserve
+              # existing bypass rules; set both cases for HTTP client compatibility.
+              services = model.get("services", {})
+
+              def networks(service):
+                  if service.get("network_mode"):
+                      return set()
+                  return set(service.get("networks") or {"default": None})
+
+              for service in services.values():
+                  own_networks = networks(service)
+                  names = set()
+                  for name, peer in services.items():
+                      shared = own_networks & networks(peer)
+                      if not shared:
+                          continue
+                      names.add(name)
+                      for network in shared:
+                          config = (peer.get("networks") or {}).get(network) or {}
+                          names.update(config.get("aliases") or [])
+                  names = sorted(name for name in names if isinstance(name, str)
+                                 and re.fullmatch(r"[a-zA-Z0-9_][a-zA-Z0-9_.-]*", name))
+                  if not names:
+                      continue
+                  environment = dict(service.get("environment") or {})
+                  service["environment"] = environment
+                  entries = []
+                  for source in (inherited, environment):
+                      for key in ("NO_PROXY", "no_proxy"):
+                          for entry in (source.get(key) or "").split(","):
+                              entry = entry.strip()
+                              if entry and entry not in entries:
+                                  entries.append(entry)
+                  entries.extend(name for name in names if name not in entries)
+                  environment["NO_PROXY"] = environment["no_proxy"] = ",".join(entries)
+
+          configure_service_no_proxy(model, os.environ)
+
           ca_dir = Path("/etc/ssl/certs")
           for filename in ("sbx-proxy-ca.crt", "sbx-ca-bundle.crt", "sbx-wgetrc", "sbx-maven-proxy.sh"):
               if not (ca_dir / filename).is_file():
