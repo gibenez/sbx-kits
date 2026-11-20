@@ -42,9 +42,6 @@ setup:
     - command: npx -y skills@latest add https://github.com/only-cli/oc -g -y --skill web-browsing-cli
       user: "1000"
       description: Install OnlyCli Skill
-    - command: npx -y skills@latest add https://github.com/smeup-ergon/skills -g -y
-      user: "1000"
-      description: Install Ergon Skills
     - command: npm install -g @playwright/cli@latest
       user: "1000"
       description: Install Playwright
@@ -78,12 +75,36 @@ setup:
           chown -R 1000:1000 /home/agent/.docker
 
           # 3. Extract the proxy CA certificate, build a combined CA bundle, and wrap docker build/run
+          CA_CERT="/etc/ssl/certs/sbx-proxy-ca.crt"
+          CA_BUNDLE="/etc/ssl/certs/sbx-ca-bundle.crt"
+          WGET_RC="/etc/ssl/certs/sbx-wgetrc"
+
+          rm -f "$CA_CERT"
           if [ -n "$PROXY_CA_CERT_B64" ]; then
-            printf '%s' "$PROXY_CA_CERT_B64" | base64 -d > /etc/ssl/certs/sbx-proxy-ca.crt
-            cat /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/sbx-proxy-ca.crt > /etc/ssl/certs/sbx-ca-bundle.crt
-            printf 'ca_certificate = /etc/ssl/certs/sbx-ca-bundle.crt\n' > /etc/ssl/certs/sbx-wgetrc
-            chmod 644 /etc/ssl/certs/sbx-proxy-ca.crt /etc/ssl/certs/sbx-ca-bundle.crt /etc/ssl/certs/sbx-wgetrc
+            printf '%s' "$PROXY_CA_CERT_B64" | base64 -d > "$CA_CERT" 2>/dev/null || true
           fi
+          if [ ! -s "$CA_CERT" ] && compgen -G "/usr/local/share/ca-certificates/*.crt" > /dev/null; then
+            cat /usr/local/share/ca-certificates/*.crt > "$CA_CERT"
+          fi
+          if [ ! -s "$CA_CERT" ] && [ -f /etc/ssl/certs/ca-certificates.crt ]; then
+            python3 -c '
+          import re, subprocess
+          data = open("/etc/ssl/certs/ca-certificates.crt").read()
+          for pem in re.findall(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", data, re.S):
+              out = subprocess.run(["openssl", "x509", "-noout", "-subject"], input=pem, text=True, capture_output=True).stdout
+              if "Docker Sandboxes" in out:
+                  open("/etc/ssl/certs/sbx-proxy-ca.crt", "w").write(pem + "\n")
+                  break
+          ' 2>/dev/null || true
+          fi
+
+          cat /etc/ssl/certs/ca-certificates.crt > "$CA_BUNDLE"
+          if [ -s "$CA_CERT" ] && ! grep -Fqxf "$CA_CERT" "$CA_BUNDLE" 2>/dev/null; then
+            cat "$CA_CERT" >> "$CA_BUNDLE"
+          fi
+          printf 'ca_certificate = %s\n' "$CA_BUNDLE" > "$WGET_RC"
+          chmod 644 "$CA_BUNDLE" "$WGET_RC"
+          [ -f "$CA_CERT" ] && chmod 644 "$CA_CERT"
 
           if [ -x /usr/bin/docker ]; then
             REAL_DOCKER_BIN="/usr/bin/docker"
@@ -103,7 +124,7 @@ setup:
           CA_BUNDLE="/etc/ssl/certs/sbx-ca-bundle.crt"
           WGET_RC="/etc/ssl/certs/sbx-wgetrc"
 
-          if [ ! -f "$CA_BUNDLE" ]; then
+          if [ ! -s "$CA_BUNDLE" ]; then
             exec "$REAL_DOCKER" "$@"
           fi
 
@@ -160,11 +181,12 @@ setup:
               esac
             done
 
+            STDIN_DF=""
             if [ "$ORIG_DF" = "-" ]; then
-              exec "$REAL_DOCKER" $SUBCMD -f - "${ARGS[@]}"
-            fi
-
-            if [ -z "$ORIG_DF" ]; then
+              STDIN_DF=$(mktemp /tmp/sbx-stdin-df.XXXXXX)
+              cat > "$STDIN_DF"
+              ORIG_DF="$STDIN_DF"
+            elif [ -z "$ORIG_DF" ]; then
               if [ -f "$CTX_DIR/Dockerfile" ]; then
                 ORIG_DF="$CTX_DIR/Dockerfile"
               elif [ -f "$CTX_DIR/dockerfile" ]; then
@@ -174,7 +196,7 @@ setup:
 
             if [ -n "$ORIG_DF" ] && [ -f "$ORIG_DF" ]; then
               TMP_DF=$(mktemp /tmp/sbx-dockerfile.XXXXXX)
-              trap 'rm -f "$TMP_DF"' EXIT
+              trap 'rm -f "$TMP_DF" "$STDIN_DF"' EXIT
               awk '
                 { print }
                 /^[[:space:]]*[Ff][Rr][Oo][Mm][[:space:]]+/ {
