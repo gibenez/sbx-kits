@@ -322,24 +322,30 @@ setup:
           if [ "${SBX_PROXY_NETWORK_NONE:-0}" != 1 ]; then
             if command -v mvn >/dev/null 2>&1 || command -v jbang >/dev/null 2>&1 || [ -n "${JBANG_VERSION:-}" ]; then maven_needed=1; fi
           fi
-          if [ "$maven_needed" = 1 ] || [ "${SBX_PROXY_MAVEN:-0}" = 1 ]; then
+          # Auto-detection of an installed Maven/JBang is not evidence this command
+          # uses it. Read-only cached compiler/DB probes still need JVM trust/proxy
+          # setup above, but cannot create HOME settings. Never mistake EROFS for
+          # lock contention; explicit/direct Maven setup still fails closed.
+          maven_required=${SBX_PROXY_MAVEN:-0}
+          case "${1##*/}" in mvn|mvnDebug|mvnw|jbang) maven_required=1;; esac
+          maven_unwritable() {
+            if [ -e "$settings" ]; then
+              [ -f "$record" ] && cmp -s "$settings" "$record" && cmp -s "$settings" "$work/settings.xml" || fail 'existing Maven settings preserved; explicit merge or an isolated Maven HOME is required'
+            else
+              [ ! -e "$record" ] || fail 'inconsistent Maven adapter record; explicit integration required'
+              [ "$maven_required" != 1 ] || fail 'Maven setup requires writable HOME/.m2 or preprovisioned matching adapter settings'
+              echo 'sbx-proxy: Maven auto-setup unavailable on unwritable HOME/.m2; cached/non-Maven commands only; dependency resolution requires writable HOME or reviewed settings' >&2
+            fi
+          }
+          configure_maven() {
             ensure_work
             [ -n "${HOME:-}" ] || fail 'HOME is required for the Maven adapter'
             [ ! -L "$HOME/.m2" ] || fail 'Maven directory symlink preserved; explicit integration required'
-            mkdir -p "$HOME/.m2" || fail 'Maven requires a writable HOME/.m2'
             settings=$HOME/.m2/settings.xml
             record=$HOME/.m2/.sbx-proxy-settings
             for path in "$settings" "$record"; do
               [ ! -L "$path" ] || fail 'Maven settings symlink preserved; explicit integration required'
             done
-            lock_path=$HOME/.m2/.sbx-proxy-lock
-            attempt=0
-            while ! mkdir "$lock_path" 2>/dev/null; do
-              attempt=$((attempt + 1))
-              [ "$attempt" -lt 50 ] || fail 'Maven setup lock remained busy; inspect the adapter lock explicitly'
-              sleep 0.1
-            done
-            settings_lock=$lock_path
             umask 077
             {
               printf '%s\n' '<!-- sbx-proxy: managed runtime settings; command-scoped during builds -->' '<settings xmlns="http://maven.apache.org/SETTINGS/1.2.0"><proxies>'
@@ -347,6 +353,24 @@ setup:
               printf '<proxy><id>sbx-https</id><active>true</active><protocol>https</protocol><host>%s</host><port>%s</port><nonProxyHosts>%s</nonProxyHosts></proxy>\n' "$https_host" "$https_port" "$nonproxy"
               printf '%s\n' '</proxies></settings>'
             } >"$work/settings.xml"
+            if ! mkdir -p "$HOME/.m2" 2>/dev/null; then maven_unwritable; return; fi
+            lock_path=$HOME/.m2/.sbx-proxy-lock
+            attempt=0
+            while ! mkdir "$lock_path" 2>/dev/null; do
+              if [ ! -e "$lock_path" ] && [ ! -L "$lock_path" ]; then
+                # A competing creator may have just released the lock. Test an
+                # exclusive sibling write before classifying HOME as unwritable.
+                if settings_tmp=$(mktemp "$HOME/.m2/.sbx-settings.XXXXXX" 2>/dev/null); then
+                  rm -f "$settings_tmp"; settings_tmp=''
+                else
+                  settings_tmp=''; maven_unwritable; return
+                fi
+              fi
+              attempt=$((attempt + 1))
+              [ "$attempt" -lt 50 ] || fail 'Maven setup lock remained busy; inspect the adapter lock explicitly'
+              sleep 0.1
+            done
+            settings_lock=$lock_path
             if [ -e "$settings" ]; then
               # Shared dependency caches and restart are safe ONLY with our unedited,
               # byte-identical required policy. Never rewrite a live/shared configuration.
@@ -365,7 +389,8 @@ setup:
               fi
             fi
             rmdir "$settings_lock"; settings_lock=''
-          fi
+          }
+          if [ "$maven_needed" = 1 ] || [ "${SBX_PROXY_MAVEN:-0}" = 1 ]; then configure_maven; fi
 
           if [ "$mode" = --runtime ]; then
             # Runtime records permit restart/shared caches with an identical policy.
