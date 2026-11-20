@@ -169,7 +169,9 @@ setup:
             if [ -n "$work" ]; then rm -rf "$work"; fi
           }
           trap cleanup EXIT
-          work=$(mktemp -d /tmp/sbx-proxy.XXXXXX) || fail 'a writable /tmp is required by the trust adapter'
+          ensure_work() {
+            [ -n "$work" ] || work=$(mktemp -d /tmp/sbx-proxy.XXXXXX) || fail 'a writable /tmp is required by the trust adapter'
+          }
 
           # Extend image/operator CA bundles in private temporary copies. Never replace
           # the originals or discard their private roots. Java clones its own store below.
@@ -189,6 +191,12 @@ setup:
             cat "$1" "$assets/proxy-ca.crt" >"$work/$2.crt"
             printf '%s' "$work/$2.crt"
           }
+          # Default bundles are mounted read-only and need no temporary copies.
+          # Allocate in the parent shell only when a custom bundle needs extending;
+          # allocation inside extend_bundle's command substitution would leak it.
+          for bundle in "$SSL_CERT_FILE" "$CURL_CA_BUNDLE" "$REQUESTS_CA_BUNDLE" "$PIP_CERT" "$GIT_SSL_CAINFO" "$CARGO_HTTP_CAINFO" "$NODE_EXTRA_CA_CERTS" "$NPM_CONFIG_CAFILE" "$DENO_CERT"; do
+            case "$bundle" in "$assets/ca-bundle.crt"|"$assets/proxy-ca.crt") ;; *) ensure_work ;; esac
+          done
           SSL_CERT_FILE=$(extend_bundle "$SSL_CERT_FILE" ssl)
           CURL_CA_BUNDLE=$(extend_bundle "$CURL_CA_BUNDLE" curl)
           REQUESTS_CA_BUNDLE=$(extend_bundle "$REQUESTS_CA_BUNDLE" requests)
@@ -299,6 +307,7 @@ setup:
             esac
             command -v keytool >/dev/null 2>&1 || fail 'Java detected without keytool; provide a reviewed trust-store adapter'
             [ -n "${JAVA_HOME:-}" ] && [ -r "$JAVA_HOME/lib/security/cacerts" ] || fail 'Java requires JAVA_HOME with a readable default cacerts store'
+            ensure_work
             cp -L "$JAVA_HOME/lib/security/cacerts" "$work/cacerts" || fail 'could not copy Java trust store'
             keytool -delete -alias sbx-proxy-ca -keystore "$work/cacerts" -storepass changeit >/dev/null 2>&1 || true
             keytool -importcert -noprompt -alias sbx-proxy-ca -file "$assets/proxy-ca.crt" -keystore "$work/cacerts" -storepass changeit >/dev/null 2>&1 || fail 'could not extend Java trust store (custom passwords require explicit integration)'
@@ -314,6 +323,7 @@ setup:
             if command -v mvn >/dev/null 2>&1 || command -v jbang >/dev/null 2>&1 || [ -n "${JBANG_VERSION:-}" ]; then maven_needed=1; fi
           fi
           if [ "$maven_needed" = 1 ] || [ "${SBX_PROXY_MAVEN:-0}" = 1 ]; then
+            ensure_work
             [ -n "${HOME:-}" ] || fail 'HOME is required for the Maven adapter'
             [ ! -L "$HOME/.m2" ] || fail 'Maven directory symlink preserved; explicit integration required'
             mkdir -p "$HOME/.m2" || fail 'Maven requires a writable HOME/.m2'
