@@ -48,23 +48,24 @@ setup:
     - command: playwright-cli install --skills agents --global
       user: "1000"
       description: Install Playwright Skills
+
   startup:
     - command:
         - bash
         - -c
         - |
-          # Load proxy and CA variables from the current environment or PID 1
+          # Load proxy and CA variables from the current environment or PID 1.
           while IFS='=' read -r k v; do
             case "$k" in
               HTTP_PROXY|HTTPS_PROXY|NO_PROXY|PROXY_CA_CERT_B64) export "$k=$v" ;;
             esac
           done < <(env; tr '\0' '\n' < /proc/1/environ 2>/dev/null)
 
-          # 1. Preserve proxy and CA environment variables across sudo
+          # Preserve proxy and CA environment variables across sudo.
           echo 'Defaults env_keep += "HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy SSL_CERT_FILE NODE_EXTRA_CA_CERTS NODE_USE_ENV_PROXY"' > /etc/sudoers.d/sbx-proxy
           chmod 440 /etc/sudoers.d/sbx-proxy
 
-          # 2. Configure Docker CLI / BuildKit to always route through the L7 proxy
+          # Configure Docker CLI / BuildKit to use the sandbox proxy.
           for d in /home/agent/.docker /root/.docker; do
             mkdir -p "$d"
             [ -f "$d/config.json" ] || echo '{}' > "$d/config.json"
@@ -74,7 +75,7 @@ setup:
           done
           chown -R 1000:1000 /home/agent/.docker
 
-          # 3. Extract the proxy CA certificate, build a combined CA bundle, and wrap docker build/run
+          # Extract the sandbox proxy CA and create a combined CA bundle.
           CA_CERT="/etc/ssl/certs/sbx-proxy-ca.crt"
           CA_BUNDLE="/etc/ssl/certs/sbx-ca-bundle.crt"
           WGET_RC="/etc/ssl/certs/sbx-wgetrc"
@@ -98,14 +99,17 @@ setup:
           ' 2>/dev/null || true
           fi
 
-          cat /etc/ssl/certs/ca-certificates.crt > "$CA_BUNDLE"
-          if [ -s "$CA_CERT" ] && ! grep -Fqxf "$CA_CERT" "$CA_BUNDLE" 2>/dev/null; then
-            cat "$CA_CERT" >> "$CA_BUNDLE"
+          if [ ! -s "$CA_CERT" ]; then
+            echo 'sbx: sandbox proxy CA is unavailable; cannot configure verified Docker access' >&2
+            exit 1
           fi
-          printf 'ca_certificate = %s\n' "$CA_BUNDLE" > "$WGET_RC"
-          chmod 644 "$CA_BUNDLE" "$WGET_RC"
-          [ -f "$CA_CERT" ] && chmod 644 "$CA_CERT"
 
+          cat /etc/ssl/certs/ca-certificates.crt > "$CA_BUNDLE"
+          cat "$CA_CERT" >> "$CA_BUNDLE"
+          printf 'ca_certificate = %s\n' "$CA_BUNDLE" > "$WGET_RC"
+          chmod 644 "$CA_CERT" "$CA_BUNDLE" "$WGET_RC"
+
+          REAL_DOCKER_BIN=""
           if [ -x /usr/bin/docker ]; then
             REAL_DOCKER_BIN="/usr/bin/docker"
           elif [ -x /usr/local/bin/docker.real ]; then
@@ -115,8 +119,12 @@ setup:
             REAL_DOCKER_BIN="/usr/local/bin/docker.real"
           fi
 
-          if [ -n "$REAL_DOCKER_BIN" ]; then
-            cat << 'EOF' > /usr/local/bin/docker
+          if [ -z "$REAL_DOCKER_BIN" ]; then
+            echo 'sbx: Docker executable is unavailable' >&2
+            exit 1
+          fi
+
+          cat << 'EOF' > /usr/local/bin/docker
           #!/usr/bin/env bash
           set -e
 
@@ -128,7 +136,7 @@ setup:
             exec "$REAL_DOCKER" "$@"
           fi
 
-          if [ "$1" = "run" ]; then
+          if [ "${1:-}" = "run" ]; then
             shift
             exec "$REAL_DOCKER" run \
               -v "$CA_BUNDLE:$CA_BUNDLE:ro" \
@@ -146,11 +154,188 @@ setup:
               "$@"
           fi
 
+          # Compose builds do not invoke the docker build wrapper below.
+          # Resolve their build definitions and inject the CA explicitly.
+          if [ "${1:-}" = "compose" ]; then
+            # Use fd 3 for the helper so Compose retains the caller's stdin.
+            python3 /dev/fd/3 "$REAL_DOCKER" "$@" 3<<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+          import tempfile
+          from pathlib import Path
+
+          real = sys.argv[1]
+          args = sys.argv[2:]
+          value_options = {
+              "--ansi", "--env-file", "-f", "--file", "--parallel",
+              "--profile", "--progress", "--project-directory",
+              "-p", "--project-name",
+          }
+          flag_options = {"--all-resources", "--compatibility", "--dry-run"}
+          globals_ = []
+          i = 1
+
+          while i < len(args):
+              arg = args[i]
+              if arg in value_options:
+                  if i + 1 >= len(args):
+                      sys.exit(subprocess.call([real] + args))
+                  globals_.extend(args[i:i + 2])
+                  i += 2
+              elif arg in flag_options or (
+                  arg.startswith("--") and "=" in arg
+                  and arg.split("=", 1)[0] in value_options
+              ):
+                  globals_.append(arg)
+                  i += 1
+              elif arg.startswith("-"):
+                  # Do not guess how an unfamiliar global option is parsed.
+                  sys.exit(subprocess.call([real] + args))
+              else:
+                  break
+
+          if i >= len(args):
+              sys.exit(subprocess.call([real] + args))
+
+          command = args[i]
+          if command not in {"build", "up", "create", "run", "watch"}:
+              sys.exit(subprocess.call([real] + args))
+
+          # Resolved configuration can contain credentials. Do not print it.
+          result = subprocess.run(
+              [real, "compose"] + globals_ + ["config", "--format", "json"],
+              stdout=subprocess.PIPE,
+          )
+          if result.returncode:
+              sys.exit(result.returncode)
+          try:
+              model = json.loads(result.stdout)
+          except (ValueError, TypeError):
+              sys.exit("sbx: could not decode the resolved Compose configuration")
+
+          ca_dir = Path("/etc/ssl/certs")
+          for filename in ("sbx-proxy-ca.crt", "sbx-ca-bundle.crt", "sbx-wgetrc"):
+              if not (ca_dir / filename).is_file():
+                  sys.exit("sbx: required proxy CA files are missing")
+
+          injection = """
+          COPY --from=sbx_ca sbx-proxy-ca.crt /usr/local/share/ca-certificates/sbx-proxy-ca.crt
+          COPY --from=sbx_ca sbx-ca-bundle.crt sbx-wgetrc /etc/ssl/certs/
+          ENV WGETRC=/etc/ssl/certs/sbx-wgetrc SSL_CERT_FILE=/etc/ssl/certs/sbx-ca-bundle.crt CURL_CA_BUNDLE=/etc/ssl/certs/sbx-ca-bundle.crt REQUESTS_CA_BUNDLE=/etc/ssl/certs/sbx-ca-bundle.crt PIP_CERT=/etc/ssl/certs/sbx-ca-bundle.crt GIT_SSL_CAINFO=/etc/ssl/certs/sbx-ca-bundle.crt CARGO_HTTP_CAINFO=/etc/ssl/certs/sbx-ca-bundle.crt NODE_EXTRA_CA_CERTS=/etc/ssl/certs/sbx-ca-bundle.crt NPM_CONFIG_CAFILE=/etc/ssl/certs/sbx-ca-bundle.crt DENO_CERT=/etc/ssl/certs/sbx-ca-bundle.crt
+          RUN if [ "$(id -u)" = "0" ]; then if command -v update-ca-certificates >/dev/null 2>&1; then update-ca-certificates; elif command -v update-ca-trust >/dev/null 2>&1; then mkdir -p /etc/pki/ca-trust/source/anchors && cp /usr/local/share/ca-certificates/sbx-proxy-ca.crt /etc/pki/ca-trust/source/anchors/ && update-ca-trust; fi; if command -v keytool >/dev/null 2>&1; then keytool -delete -alias sbx-proxy-ca -cacerts -storepass changeit >/dev/null 2>&1 || true; keytool -importcert -noprompt -trustcacerts -alias sbx-proxy-ca -file /usr/local/share/ca-certificates/sbx-proxy-ca.crt -cacerts -storepass changeit; fi; fi
+          """
+
+          def inject_ca(text):
+              # Supports ordinary single-line FROM instructions and Linux
+              # shell-based build stages, not arbitrary Dockerfile syntax.
+              starts = list(re.finditer(r"(?im)^FROM[ \t]+[^\r\n]+", text))
+              if not starts:
+                  raise ValueError("Dockerfile has no supported FROM instruction")
+              for n in range(len(starts) - 1, -1, -1):
+                  match = starts[n]
+                  end = starts[n + 1].start() if n + 1 < len(starts) else len(text)
+                  body = text[match.end():end]
+                  # Avoid adding shell commands to final distroless/scratch
+                  # stages that do not execute RUN instructions.
+                  if not re.search(r"(?im)^[ \t]*RUN[ \t]+", body):
+                      continue
+                  words = match.group().split()[1:]
+                  image = next((w for w in words if not w.startswith("--")), "")
+                  if image.lower() == "scratch" or match.group().rstrip().endswith("\\"):
+                      raise ValueError("unsupported Dockerfile stage")
+                  text = text[:match.end()] + "\n" + injection + text[match.end():]
+              return text
+
+          try:
+              for service in model.get("services", {}).values():
+                  build = service.get("build")
+                  if not build:
+                      continue
+                  if isinstance(build, str):
+                      build = {"context": build}
+                      service["build"] = build
+
+                  context = build.get("context", ".")
+                  if not os.path.isdir(context):
+                      raise ValueError("a local directory build context is required")
+
+                  text = build.get("dockerfile_inline")
+                  if text is None:
+                      dockerfile = Path(build.get("dockerfile", "Dockerfile"))
+                      if not dockerfile.is_absolute():
+                          dockerfile = Path(context) / dockerfile
+                      text = dockerfile.read_text()
+
+                  contexts = build.get("additional_contexts", {})
+                  if isinstance(contexts, list):
+                      contexts = dict(entry.split("=", 1) for entry in contexts)
+                  else:
+                      contexts = dict(contexts)
+                  if "sbx_ca" in contexts:
+                      raise ValueError("reserved additional context is already used")
+
+                  contexts["sbx_ca"] = str(ca_dir)
+                  build["additional_contexts"] = contexts
+                  build.pop("dockerfile", None)
+                  build["dockerfile_inline"] = inject_ca(text)
+
+          except (OSError, ValueError, TypeError):
+              sys.exit("sbx: Compose CA injection failed; check local build contexts and Dockerfile syntax")
+
+          # Prevent a second round of Compose interpolation from changing
+          # values in the already-resolved model, including Dockerfiles.
+          def escape_dollars(value):
+              if isinstance(value, str):
+                  return value.replace("$", "$$")
+              if isinstance(value, list):
+                  return [escape_dollars(item) for item in value]
+              if isinstance(value, dict):
+                  return {key: escape_dollars(item) for key, item in value.items()}
+              return value
+
+          forward = []
+          j = 0
+          while j < len(globals_):
+              arg = globals_[j]
+              if arg in {"-f", "--file", "--env-file"}:
+                  j += 2
+              elif arg.startswith(("--file=", "--env-file=")):
+                  j += 1
+              else:
+                  forward.append(arg)
+                  j += 1
+
+          if not model.get("name"):
+              sys.exit("sbx: resolved Compose configuration has no project name")
+
+          # TemporaryDirectory is private; the resolved model is mode 0600
+          # and is removed when Compose exits. Never log its contents.
+          with tempfile.TemporaryDirectory(prefix="sbx-compose-ca-") as directory:
+              config = Path(directory) / "compose.json"
+              config.write_text(json.dumps(escape_dollars(model)))
+              config.chmod(0o600)
+              status = subprocess.call(
+                  [real, "compose"] + forward
+                  + [
+                      "--env-file", "/dev/null",
+                      "--project-name", model["name"],
+                      "-f", str(config),
+                  ]
+                  + args[i:]
+              )
+          sys.exit(status)
+          PY
+            exit $?
+          fi
+
           SUBCMD=""
-          if [ "$1" = "build" ]; then
+          if [ "${1:-}" = "build" ]; then
             SUBCMD="build"
             shift
-          elif [ "$1" = "buildx" ] && [ "$2" = "build" ]; then
+          elif [ "${1:-}" = "buildx" ] && [ "${2:-}" = "build" ]; then
             SUBCMD="buildx build"
             shift 2
           fi
@@ -216,12 +401,14 @@ setup:
               "$REAL_DOCKER" $SUBCMD --build-context sbx_ca=/etc/ssl/certs -f "$TMP_DF" "${ARGS[@]}"
               exit $?
             fi
+
+            echo 'sbx: cannot locate a local Dockerfile for verified CA injection' >&2
+            exit 1
           fi
 
           exec "$REAL_DOCKER" "$@"
           EOF
-            sed -i "s|__REAL_DOCKER__|$REAL_DOCKER_BIN|g" /usr/local/bin/docker
-            chmod +x /usr/local/bin/docker
-          fi
+          sed -i "s|__REAL_DOCKER__|$REAL_DOCKER_BIN|g" /usr/local/bin/docker
+          chmod +x /usr/local/bin/docker
       user: "0"
-      description: Configure proxy and proxy CA for Docker-in-Sandbox and sudo
+      description: Configure proxy and proxy CA for Docker, Compose builds, and sudo
