@@ -109,6 +109,73 @@ setup:
           printf 'ca_certificate = %s\n' "$CA_BUNDLE" > "$WGET_RC"
           chmod 644 "$CA_CERT" "$CA_BUNDLE" "$WGET_RC"
 
+          # Maven Resolver (including JBang) needs settings.xml proxy entries;
+          # HTTP_PROXY and even JVM proxy properties alone are insufficient.
+          cat << 'MAVEN_PROXY' > /etc/ssl/certs/sbx-maven-proxy.sh
+          #!/bin/sh
+          # Sandbox-only Maven/JBang proxy setup. Never disable TLS verification.
+          set -eu
+          proxy=${HTTPS_PROXY:-${https_proxy:-${HTTP_PROXY:-${http_proxy:-}}}}
+          [ -n "$proxy" ] || exit 0
+          case "$proxy" in
+            http://*) authority=${proxy#http://} ;;
+            *) echo 'sbx: Maven proxy requires an http:// proxy URL' >&2; exit 1 ;;
+          esac
+          authority=${authority%/}
+          case "$authority" in
+            *@*|*/*|*\?*|*\#*) echo 'sbx: unsupported Maven proxy URL (authentication/path/query)' >&2; exit 1 ;;
+          esac
+          host=${authority%:*}
+          port=${authority##*:}
+          case "$host" in
+            ''|*[!a-zA-Z0-9._-]*) echo 'sbx: unsupported Maven proxy host' >&2; exit 1 ;;
+          esac
+          case "$port" in
+            ''|*[!0-9]*) echo 'sbx: Maven proxy requires an explicit numeric port' >&2; exit 1 ;;
+          esac
+          [ "$host" != "$port" ] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || exit 1
+          # Maven uses | separators and wildcard suffixes, not NO_PROXY's leading dots.
+          # CIDRs and host:port entries cannot be represented faithfully. Keep those
+          # destinations on the proxy (with a warning), never widen their direct bypass.
+          nonproxy='localhost|127.*|[::1]'
+          set -f
+          saved_ifs=$IFS
+          IFS=,
+          for entry in ${NO_PROXY:-${no_proxy:-}}; do
+            case "$entry" in
+              '') continue ;;
+              ::1|'[::1]') continue ;;
+              *[!a-zA-Z0-9.*_-]*) echo 'sbx: unsupported NO_PROXY entry not bypassed by Maven (proxy retained)' >&2; continue ;;
+              .*) nonproxy="$nonproxy|*$entry|${entry#.}" ;;
+              *) nonproxy="$nonproxy|$entry" ;;
+            esac
+          done
+          IFS=$saved_ifs
+          if [ "${1:-}" = '--jbang-options' ]; then
+            printf '%s\n' "-Dhttp.proxyHost=$host -Dhttp.proxyPort=$port -Dhttps.proxyHost=$host -Dhttps.proxyPort=$port -Dhttp.nonProxyHosts=$nonproxy"
+            exit 0
+          fi
+          [ -n "${HOME:-}" ] || { echo 'sbx: HOME is required for Maven settings' >&2; exit 1; }
+          mkdir -p "$HOME/.m2"
+          settings=$HOME/.m2/settings.xml
+          tmp=$(mktemp "$HOME/.m2/.sbx-settings.XXXXXX")
+          trap 'rm -f "$tmp"' EXIT HUP INT TERM
+          umask 077
+          printf '%s\n' '<!-- sbx-managed Maven proxy; generated from sandbox environment -->' \
+            '<settings xmlns="http://maven.apache.org/SETTINGS/1.2.0"><proxies><proxy><id>sbx-proxy</id><active>true</active><protocol>http</protocol>' > "$tmp"
+          printf '<host>%s</host><port>%s</port><nonProxyHosts>%s</nonProxyHosts>\n' "$host" "$port" "$nonproxy" >> "$tmp"
+          printf '%s\n' '</proxy></proxies></settings>' >> "$tmp"
+          if [ -e "$settings" ] || [ -L "$settings" ]; then
+            if [ ! -L "$settings" ] && cmp -s "$tmp" "$settings"; then exit 0; fi
+            echo 'sbx: existing Maven settings preserved; merge sandbox proxy configuration explicitly' >&2
+            exit 1
+          fi
+          # Hard-link creation is exclusive: never overwrite even if another process wins.
+          ln "$tmp" "$settings"
+          echo 'sbx: Maven proxy settings configured (TLS verification retained)'
+          MAVEN_PROXY
+          chmod 644 /etc/ssl/certs/sbx-maven-proxy.sh
+
           REAL_DOCKER_BIN=""
           if [ -x /usr/bin/docker ]; then
             REAL_DOCKER_BIN="/usr/bin/docker"
@@ -206,7 +273,9 @@ setup:
 
           # Resolved configuration can contain credentials. Do not print it.
           result = subprocess.run(
-              [real, "compose"] + globals_ + ["config", "--format", "json"],
+              # Keep profiled services in the model. Explicit `run SERVICE`
+              # must still work when its profile wasn't selected globally.
+              [real, "compose"] + globals_ + ["--profile", "*", "config", "--format", "json"],
               stdout=subprocess.PIPE,
           )
           if result.returncode:
@@ -217,16 +286,23 @@ setup:
               sys.exit("sbx: could not decode the resolved Compose configuration")
 
           ca_dir = Path("/etc/ssl/certs")
-          for filename in ("sbx-proxy-ca.crt", "sbx-ca-bundle.crt", "sbx-wgetrc"):
+          for filename in ("sbx-proxy-ca.crt", "sbx-ca-bundle.crt", "sbx-wgetrc", "sbx-maven-proxy.sh"):
               if not (ca_dir / filename).is_file():
                   sys.exit("sbx: required proxy CA files are missing")
 
+          # JBang's own catalog fetches use JVM proxy properties, independently
+          # of Maven settings. Do not set global JAVA_TOOL_OPTIONS.
+          java_proxy_options = subprocess.check_output(
+              ["sh", str(ca_dir / "sbx-maven-proxy.sh"), "--jbang-options"], text=True,
+          ).strip()
           injection = """
           COPY --from=sbx_ca sbx-proxy-ca.crt /usr/local/share/ca-certificates/sbx-proxy-ca.crt
-          COPY --from=sbx_ca sbx-ca-bundle.crt sbx-wgetrc /etc/ssl/certs/
+          COPY --from=sbx_ca sbx-ca-bundle.crt sbx-wgetrc sbx-maven-proxy.sh /etc/ssl/certs/
           ENV WGETRC=/etc/ssl/certs/sbx-wgetrc SSL_CERT_FILE=/etc/ssl/certs/sbx-ca-bundle.crt CURL_CA_BUNDLE=/etc/ssl/certs/sbx-ca-bundle.crt REQUESTS_CA_BUNDLE=/etc/ssl/certs/sbx-ca-bundle.crt PIP_CERT=/etc/ssl/certs/sbx-ca-bundle.crt GIT_SSL_CAINFO=/etc/ssl/certs/sbx-ca-bundle.crt CARGO_HTTP_CAINFO=/etc/ssl/certs/sbx-ca-bundle.crt NODE_EXTRA_CA_CERTS=/etc/ssl/certs/sbx-ca-bundle.crt NPM_CONFIG_CAFILE=/etc/ssl/certs/sbx-ca-bundle.crt DENO_CERT=/etc/ssl/certs/sbx-ca-bundle.crt
           RUN if [ "$(id -u)" = "0" ]; then if command -v update-ca-certificates >/dev/null 2>&1; then update-ca-certificates; elif command -v update-ca-trust >/dev/null 2>&1; then mkdir -p /etc/pki/ca-trust/source/anchors && cp /usr/local/share/ca-certificates/sbx-proxy-ca.crt /etc/pki/ca-trust/source/anchors/ && update-ca-trust; fi; if command -v keytool >/dev/null 2>&1; then keytool -delete -alias sbx-proxy-ca -cacerts -storepass changeit >/dev/null 2>&1 || true; keytool -importcert -noprompt -trustcacerts -alias sbx-proxy-ca -file /usr/local/share/ca-certificates/sbx-proxy-ca.crt -cacerts -storepass changeit; fi; fi
+          RUN sh /etc/ssl/certs/sbx-maven-proxy.sh
           """
+          injection += '\nENV JBANG_JAVA_OPTIONS="${JBANG_JAVA_OPTIONS} ' + java_proxy_options + '"\n'
 
           def inject_ca(text):
               # Supports ordinary single-line FROM instructions and Linux
@@ -382,7 +458,8 @@ setup:
             if [ -n "$ORIG_DF" ] && [ -f "$ORIG_DF" ]; then
               TMP_DF=$(mktemp /tmp/sbx-dockerfile.XXXXXX)
               trap 'rm -f "$TMP_DF" "$STDIN_DF"' EXIT
-              awk '
+              JAVA_PROXY_OPTIONS=$(sh /etc/ssl/certs/sbx-maven-proxy.sh --jbang-options)
+              awk -v java_proxy_options="$JAVA_PROXY_OPTIONS" '
                 { print }
                 /^[[:space:]]*[Ff][Rr][Oo][Mm][[:space:]]+/ {
                   img = ""
@@ -391,9 +468,11 @@ setup:
                   }
                   if (img != "scratch") {
                     print "COPY --from=sbx_ca sbx-proxy-ca.crt /usr/local/share/ca-certificates/sbx-proxy-ca.crt"
-                    print "COPY --from=sbx_ca sbx-ca-bundle.crt sbx-wgetrc /etc/ssl/certs/"
+                    print "COPY --from=sbx_ca sbx-ca-bundle.crt sbx-wgetrc sbx-maven-proxy.sh /etc/ssl/certs/"
                     print "ENV WGETRC=/etc/ssl/certs/sbx-wgetrc SSL_CERT_FILE=/etc/ssl/certs/sbx-ca-bundle.crt CURL_CA_BUNDLE=/etc/ssl/certs/sbx-ca-bundle.crt REQUESTS_CA_BUNDLE=/etc/ssl/certs/sbx-ca-bundle.crt PIP_CERT=/etc/ssl/certs/sbx-ca-bundle.crt GIT_SSL_CAINFO=/etc/ssl/certs/sbx-ca-bundle.crt CARGO_HTTP_CAINFO=/etc/ssl/certs/sbx-ca-bundle.crt NODE_EXTRA_CA_CERTS=/etc/ssl/certs/sbx-ca-bundle.crt NPM_CONFIG_CAFILE=/etc/ssl/certs/sbx-ca-bundle.crt DENO_CERT=/etc/ssl/certs/sbx-ca-bundle.crt"
                     print "RUN if [ \"$(id -u)\" = \"0\" ]; then if command -v update-ca-certificates >/dev/null 2>&1; then update-ca-certificates >/dev/null 2>&1; elif command -v update-ca-trust >/dev/null 2>&1; then mkdir -p /etc/pki/ca-trust/source/anchors && cp /usr/local/share/ca-certificates/sbx-proxy-ca.crt /etc/pki/ca-trust/source/anchors/ && update-ca-trust >/dev/null 2>&1; fi; if command -v keytool >/dev/null 2>&1; then keytool -importcert -noprompt -trustcacerts -alias sbx-proxy-ca -file /usr/local/share/ca-certificates/sbx-proxy-ca.crt -cacerts -storepass changeit >/dev/null 2>&1 || true; fi; fi"
+                    print "RUN sh /etc/ssl/certs/sbx-maven-proxy.sh"
+                    print "ENV JBANG_JAVA_OPTIONS=\"${JBANG_JAVA_OPTIONS} " java_proxy_options "\""
                   }
                 }
               ' "$ORIG_DF" > "$TMP_DF"
