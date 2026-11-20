@@ -13,6 +13,7 @@ sandbox:
   image: docker.io/sbx/pi-image:latest
   entrypoint:
     - pi
+
 permissions:
   network:
     allow:
@@ -20,10 +21,7 @@ permissions:
       # pi's runtime package installs (extensions, skills, prompt templates,
       # themes) and the packages named in settings, fetched on startup.
       - registry.npmjs.org
-ports:
-  - container: 22
-    protocol: tcp
-    name: ssh
+
 credentials:
   - service: llmapi
     apiKey:
@@ -35,6 +33,7 @@ credentials:
         - domain: "${{ kit.args.llmapi_domain }}"
           header: Authorization
           format: 'Bearer %s'
+
 setup:
   install:
     # dev tools and skills
