@@ -42,6 +42,9 @@ setup:
     - command: npx -y skills@latest add https://github.com/only-cli/oc -g -y --skill web-browsing-cli
       user: "1000"
       description: Install OnlyCli Skill
+    - command: npx -y skills@latest add https://github.com/smeup-ergon/skills -g -y
+      user: "1000"
+      description: Install Ergon Skills
     - command: npm install -g @playwright/cli@latest
       user: "1000"
       description: Install Playwright
