@@ -366,7 +366,11 @@ setup:
           if [ "$mode" = --exec ]; then
             # Docker exec does not inherit PID 1's exported environment. Reapply adapters
             # just for this command, preserve stdin/exit status, and clean private files.
-            "$@" <&0 & child=$!
+            # BusyBox ash redirects an async command's fd 0 before <&0.
+            # Preserve input on a separate descriptor before starting the child.
+            exec 3<&0
+            "$@" <&3 3<&- & child=$!
+            exec 3<&-
             trap 'kill -TERM "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true; exit 143' TERM
             trap 'kill -INT "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true; exit 130' INT
             set +e
