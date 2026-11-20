@@ -74,10 +74,12 @@ setup:
           done
           chown -R 1000:1000 /home/agent/.docker
 
-          # 3. Extract the proxy CA certificate and install the automatic wrapper for docker build/run
+          # 3. Extract the proxy CA certificate, build a combined CA bundle, and wrap docker build/run
           if [ -n "$PROXY_CA_CERT_B64" ]; then
             printf '%s' "$PROXY_CA_CERT_B64" | base64 -d > /etc/ssl/certs/sbx-proxy-ca.crt
-            chmod 644 /etc/ssl/certs/sbx-proxy-ca.crt
+            cat /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/sbx-proxy-ca.crt > /etc/ssl/certs/sbx-ca-bundle.crt
+            printf 'ca_certificate = /etc/ssl/certs/sbx-ca-bundle.crt\n' > /etc/ssl/certs/sbx-wgetrc
+            chmod 644 /etc/ssl/certs/sbx-proxy-ca.crt /etc/ssl/certs/sbx-ca-bundle.crt /etc/ssl/certs/sbx-wgetrc
           fi
 
           if [ -x /usr/bin/docker ]; then
@@ -95,23 +97,28 @@ setup:
           set -e
 
           REAL_DOCKER="__REAL_DOCKER__"
-          CA_CERT="/etc/ssl/certs/sbx-proxy-ca.crt"
+          CA_BUNDLE="/etc/ssl/certs/sbx-ca-bundle.crt"
+          WGET_RC="/etc/ssl/certs/sbx-wgetrc"
 
-          if [ ! -f "$CA_CERT" ]; then
+          if [ ! -f "$CA_BUNDLE" ]; then
             exec "$REAL_DOCKER" "$@"
           fi
 
           if [ "$1" = "run" ]; then
             shift
             exec "$REAL_DOCKER" run \
-              -v "$CA_CERT:$CA_CERT:ro" \
-              -e "SSL_CERT_FILE=$CA_CERT" \
-              -e "NODE_EXTRA_CA_CERTS=$CA_CERT" \
-              -e "REQUESTS_CA_BUNDLE=$CA_CERT" \
-              -e "CURL_CA_BUNDLE=$CA_CERT" \
-              -e "PIP_CERT=$CA_CERT" \
-              -e "GIT_SSL_CAINFO=$CA_CERT" \
-              -e "NPM_CONFIG_CAFILE=$CA_CERT" \
+              -v "$CA_BUNDLE:$CA_BUNDLE:ro" \
+              -v "$WGET_RC:$WGET_RC:ro" \
+              -e "WGETRC=$WGET_RC" \
+              -e "SSL_CERT_FILE=$CA_BUNDLE" \
+              -e "CURL_CA_BUNDLE=$CA_BUNDLE" \
+              -e "REQUESTS_CA_BUNDLE=$CA_BUNDLE" \
+              -e "PIP_CERT=$CA_BUNDLE" \
+              -e "GIT_SSL_CAINFO=$CA_BUNDLE" \
+              -e "CARGO_HTTP_CAINFO=$CA_BUNDLE" \
+              -e "NODE_EXTRA_CA_CERTS=$CA_BUNDLE" \
+              -e "NPM_CONFIG_CAFILE=$CA_BUNDLE" \
+              -e "DENO_CERT=$CA_BUNDLE" \
               "$@"
           fi
 
@@ -174,8 +181,9 @@ setup:
                   }
                   if (img != "scratch") {
                     print "COPY --from=sbx_ca sbx-proxy-ca.crt /usr/local/share/ca-certificates/sbx-proxy-ca.crt"
-                    print "ENV SSL_CERT_FILE=/usr/local/share/ca-certificates/sbx-proxy-ca.crt NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/sbx-proxy-ca.crt REQUESTS_CA_BUNDLE=/usr/local/share/ca-certificates/sbx-proxy-ca.crt CURL_CA_BUNDLE=/usr/local/share/ca-certificates/sbx-proxy-ca.crt"
-                    print "RUN if [ \"$(id -u)\" = \"0\" ]; then if command -v update-ca-certificates >/dev/null 2>&1; then update-ca-certificates >/dev/null 2>&1; elif command -v update-ca-trust >/dev/null 2>&1; then cp /usr/local/share/ca-certificates/sbx-proxy-ca.crt /etc/pki/ca-trust/source/anchors/ && update-ca-trust >/dev/null 2>&1; fi; fi"
+                    print "COPY --from=sbx_ca sbx-ca-bundle.crt sbx-wgetrc /etc/ssl/certs/"
+                    print "ENV WGETRC=/etc/ssl/certs/sbx-wgetrc SSL_CERT_FILE=/etc/ssl/certs/sbx-ca-bundle.crt CURL_CA_BUNDLE=/etc/ssl/certs/sbx-ca-bundle.crt REQUESTS_CA_BUNDLE=/etc/ssl/certs/sbx-ca-bundle.crt PIP_CERT=/etc/ssl/certs/sbx-ca-bundle.crt GIT_SSL_CAINFO=/etc/ssl/certs/sbx-ca-bundle.crt CARGO_HTTP_CAINFO=/etc/ssl/certs/sbx-ca-bundle.crt NODE_EXTRA_CA_CERTS=/etc/ssl/certs/sbx-ca-bundle.crt NPM_CONFIG_CAFILE=/etc/ssl/certs/sbx-ca-bundle.crt DENO_CERT=/etc/ssl/certs/sbx-ca-bundle.crt"
+                    print "RUN if [ \"$(id -u)\" = \"0\" ]; then if command -v update-ca-certificates >/dev/null 2>&1; then update-ca-certificates >/dev/null 2>&1; elif command -v update-ca-trust >/dev/null 2>&1; then mkdir -p /etc/pki/ca-trust/source/anchors && cp /usr/local/share/ca-certificates/sbx-proxy-ca.crt /etc/pki/ca-trust/source/anchors/ && update-ca-trust >/dev/null 2>&1; fi; if command -v keytool >/dev/null 2>&1; then keytool -importcert -noprompt -trustcacerts -alias sbx-proxy-ca -file /usr/local/share/ca-certificates/sbx-proxy-ca.crt -cacerts -storepass changeit >/dev/null 2>&1 || true; fi; fi"
                   }
                 }
               ' "$ORIG_DF" > "$TMP_DF"
