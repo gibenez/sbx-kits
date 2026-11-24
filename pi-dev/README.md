@@ -3,7 +3,7 @@ A sanbox development kit based on pi agent, with
 - built-in support for generic llm API (API key only, no OAuth)
 - Matt Pocock's skills
 - only-cli/oc web-browsing-cli skill
-- Playwright cli and its skills
+- Playwright CLI skill (the agent installs the CLI on first use)
 
 ## Run
 ### Set the llmapi API key

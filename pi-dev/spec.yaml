@@ -42,12 +42,10 @@ setup:
     - command: npx -y skills@latest add https://github.com/only-cli/oc -g -y --skill web-browsing-cli
       user: "1000"
       description: Install OnlyCli Skill
-    - command: npm install -g @playwright/cli@latest
+    # The upstream skill documents CLI installation; defer it until first use.
+    - command: npx -y skills@latest add https://github.com/microsoft/playwright-cli -g -y --skill playwright-cli
       user: "1000"
-      description: Install Playwright
-    - command: playwright-cli install --skills agents --global
-      user: "1000"
-      description: Install Playwright Skills
+      description: Install Playwright Skill
 
   startup:
     - command:
