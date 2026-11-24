@@ -4,6 +4,7 @@ A sanbox development kit based on pi agent, with
 - Matt Pocock's skills
 - only-cli/oc web-browsing-cli skill
 - Playwright CLI skill (the agent installs the CLI on first use)
+- pi-subagents-lite extension for lightweight sub-agents with isolated sessions, tools, and models
 
 ## Run
 ### Set the llmapi API key

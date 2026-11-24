@@ -35,6 +35,10 @@ credentials:
 
 setup:
   install:
+    - command: pi install npm:pi-subagents-lite
+      user: "1000"
+      description: Install Pi Subagents Lite
+
     # Dev tools and skills
     - command: npx -y skills@latest add mattpocock/skills -g -y $(curl -s https://raw.githubusercontent.com/mattpocock/skills/main/.claude-plugin/plugin.json | jq -r '.skills[] | split("/") | last' | xargs -n1 printf -- '-s %s ')
       user: "1000"
