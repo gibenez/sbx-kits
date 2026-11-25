@@ -78,13 +78,16 @@ From the project directory:
 ```bash
 pi                  # Native interactive TUI
 pi --mode rpc       # JSONL RPC for a host orchestrator
+pi --print "Summarize this project"  # One-shot generation, without a PTY
 ```
 
 The primary shared workspace is the current directory. Sandbox names default to `pi-` plus a sanitized basename of that directory; use `SBX_PI_SANDBOX_NAME` to select a known identity or avoid basename collisions. `/var/folders/_j` is included as an extra mount only when that host directory exists; it is not a destination for the project mount. Workspace, skill, and state paths must not contain colons because the mount syntax uses them as separators.
 
-Metadata/provisioning calls use `--no-input` and closed stdin so they cannot consume queued RPC requests or prompt for setup interactively. Final native interactive launch uses `sbx run --workdir "$PWD"` to preserve the TUI route. RPC uses `sbx exec -i --workdir "$PWD"` without `-t`, so it does not request a PTY. Because exec does not automatically source the persistent environment, its command runs Bash, sources `/etc/sandbox-persistent.sh` if readable with setup output redirected to stderr, then uses `exec pi` with the prepared arguments. Version refresh uses that same bootstrap. Both launch routes explicitly set `PI_CODING_AGENT_DIR=/home/agent/.pi/agent`; the host account directory is not forwarded.
+Metadata/provisioning calls use `--no-input` and closed stdin so they cannot consume queued RPC requests or prompt for setup interactively. Final native interactive launch uses `sbx run --workdir "$PWD"` to preserve the TUI route. RPC and explicit `--print`/`-p` generation use `sbx exec -i --workdir "$PWD"` without `-t`, so neither requests a PTY. This includes Orca's auto-naming invocation (`--print --no-session --no-tools --no-skills --no-context-files --mode text`), whose prompt arrives through stdin. The wrapper forwards stdin, stdout, stderr, and exit status without filtering generated text. `--mode text` alone does not force print mode and retains the native TUI route; literal `--print` values and arguments after `--` do not change routing. Because exec does not automatically source the persistent environment, its command runs Bash, sources `/etc/sandbox-persistent.sh` if readable with setup output redirected to stderr, then uses `exec pi` with the prepared arguments. Version refresh uses that same bootstrap. Both launch routes explicitly set `PI_CODING_AGENT_DIR=/home/agent/.pi/agent`; the host account directory is not forwarded.
 
-An RPC invocation from the host home directory refuses to create a missing sandbox, avoiding a context-free discovery probe accidentally provisioning one with the entire home as its workspace. It can still attach to an existing selected sandbox. This guard does not apply to native TUI launches; launch those from the intended project directory.
+An RPC or explicit print invocation from the host home directory refuses to create a missing sandbox, avoiding a context-free background invocation accidentally provisioning one with the entire home as its workspace. It can still attach to an existing selected sandbox. This guard does not apply to native TUI launches; launch those from the intended project directory.
+
+One-shot print calls do not receive the RPC-only session directory or resource rewriting below. In particular, Orca's `--no-session` auto-naming calls do not persist a naming conversation. This routing change only requires updating the installed host wrapper; already migrated sandboxes do not need recreation.
 
 ### RPC sessions and explicit launch resources
 

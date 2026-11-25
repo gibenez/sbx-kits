@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Host wrapper: native Pi TUI and piped RPC, sharing host-managed skills.
+# Host wrapper: native Pi TUI, piped RPC and print, sharing host-managed skills.
 set -euo pipefail
 
 fail() { printf 'pi-sbx: %s\n' "$*" >&2; exit 1; }
@@ -14,6 +14,7 @@ VERSION_PRERELEASE='(0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)'
 SEMVER="^$VERSION_NUMBER\\.$VERSION_NUMBER\\.$VERSION_NUMBER(-$VERSION_PRERELEASE(\\.$VERSION_PRERELEASE)*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?$"
 
 RPC=0
+PRINT=0
 NO_SKILLS=0
 SESSION_DIR_SET=0
 VERSION_REQUESTED=0
@@ -26,6 +27,7 @@ classify_args() {
     case "$1" in
       --) break ;;
       --version|-v) VERSION_REQUESTED=1 ;;
+      --print|-p) PRINT=1 ;;
       --mode)
         if (( $# > 1 )); then
           [[ "$2" != rpc ]] || RPC=1
@@ -82,9 +84,13 @@ if (( ! EXISTS )) && [[ "${SBX_PI_REQUIRE_EXISTING:-0}" == 1 ]]; then
 fi
 
 # exec does not source the sandbox's persistent environment automatically.
-# Keep any shell-setup diagnostics away from the RPC stdout stream.
+# Keep any shell-setup diagnostics away from RPC/print stdout.
 PI_EXEC='if [[ -r /etc/sandbox-persistent.sh ]]; then source /etc/sandbox-persistent.sh >&2; fi; exec pi "$@"'
 PI_ENV='PI_CODING_AGENT_DIR=/home/agent/.pi/agent'
+exec_piped_pi() {
+  exec sbx exec --no-input -i --workdir "$PWD" --env "$PI_ENV" -- \
+    "$SANDBOX_NAME" bash -c "$PI_EXEC" pi "$@"
+}
 refresh_version() {
   local version temporary
   # Clear first: a failed refresh must not keep advertising an older release.
@@ -113,8 +119,8 @@ fi
 
 # Context-free Orca probes may run in home. Never provision a sandbox whose
 # primary workspace would accidentally expose the whole home directory.
-if (( RPC && ! EXISTS )) && [[ "$PWD" -ef "$HOME" ]]; then
-  fail 'refusing to create an RPC sandbox in the home directory; open a project chat instead'
+if (( (RPC || PRINT) && ! EXISTS )) && [[ "$PWD" -ef "$HOME" ]]; then
+  fail 'refusing to create a non-interactive sandbox in the home directory; use a project directory instead'
 fi
 
 HOST_SKILLS="${SBX_PI_SKILLS_DIR:-$HOME/.agents/skills}"
@@ -178,6 +184,11 @@ if (( ! NO_SKILLS && ! PACKAGE_COMMAND )); then
   PI_ARGS+=(--skill "$SKILL_TARGET")
 fi
 if (( ! RPC )); then
+  # Orca names chats via --print --mode text, with the prompt on stdin.
+  # It needs raw pipes too, but not RPC session storage or resource rewriting.
+  if (( PRINT )); then
+    exec_piped_pi ${PI_ARGS[@]+"${PI_ARGS[@]}"} "$@"
+  fi
   exec sbx run --name "$SANDBOX_NAME" --workdir "$PWD" --env "$PI_ENV" -- ${PI_ARGS[@]+"${PI_ARGS[@]}"} "$@"
 fi
 
@@ -256,5 +267,4 @@ while (( $# )); do
     *) RPC_ARGS+=("$1"); shift ;;
   esac
 done
-exec sbx exec --no-input -i --workdir "$PWD" --env "$PI_ENV" -- \
-  "$SANDBOX_NAME" bash -c "$PI_EXEC" pi ${PI_ARGS[@]+"${PI_ARGS[@]}"} "${RPC_ARGS[@]}"
+exec_piped_pi ${PI_ARGS[@]+"${PI_ARGS[@]}"} "${RPC_ARGS[@]}"

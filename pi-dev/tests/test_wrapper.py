@@ -287,6 +287,59 @@ class WrapperTests(unittest.TestCase):
         self.assert_option(final, "--skill", "/mnt/pi-host-skills")
         self.assertEqual(final[-4:], ["--mode", "rpc", "--model", "a model"])
 
+    def test_orca_auto_naming_uses_non_pty_exec_without_rpc_session_options(self):
+        args = ["--print", "--no-session", "--no-tools", "--no-skills",
+                "--no-context-files", "--mode", "text"]
+        prompt = "Name this chat from the user's first request.\n\nExplain shared sessions.\n"
+        result = self.run_wrapper(*args, stdin=prompt, existing=True,
+                                  FAKE_SBX_LAUNCH_STATUS="23")
+        final = self.launches()[-1]
+        self.assertEqual(final[0], "exec", "one-shot naming must not use sbx run")
+        transport = final[:final.index("--")]
+        self.assertIn("-i", transport)
+        self.assertIn("--no-input", transport)
+        self.assertFalse({"-t", "-it", "--tty"}.intersection(transport))
+        self.assert_option(final, "--workdir", str(self.cwd))
+        self.assertEqual(final[-len(args):], args)
+        self.assertNotIn("--session-dir", final)
+        self.assertNotIn("--skill", final)
+        self.assertEqual(result.returncode, 23)
+        # Fake Pi echoes its input: this checks transport, not model naming.
+        self.assertEqual(result.stdout, prompt)
+        self.assertEqual(result.stderr, "fake pi diagnostic\n")
+        self.assertEqual(self.creations(), [])
+        self.assertFalse(list((self.state / self.name).glob("resources.*")))
+
+    def test_print_aliases_use_non_pty_and_preserve_arguments(self):
+        for args in (["--print", "a prompt with 'quotes' and $dollars"],
+                     ["-p", "--mode", "text"], ["--mode", "text", "--print"]):
+            with self.subTest(args=args):
+                result = self.run_wrapper(*args, stdin="input\n", existing=True)
+                final = self.launches()[-1]
+                self.assertEqual(final[0], "exec")
+                self.assertEqual(final[-len(args):], args)
+                self.assertNotIn("--session-dir", final)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "input\n")
+
+    def test_text_mode_without_print_and_literal_print_flags_keep_native_route(self):
+        for args in (["--mode", "text"], ["--system-prompt", "--print"],
+                     ["--name", "-p"], ["--", "--print"],
+                     ["install", "--print"], ["a message containing --print"]):
+            with self.subTest(args=args):
+                result = self.run_wrapper(*args, existing=True)
+                final = self.launches()[-1]
+                self.assertEqual(final[0], "run")
+                self.assertEqual(final[-len(args):], args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_print_in_home_refuses_missing_sandbox_before_provisioning(self):
+        result = self.run_wrapper("--print", "--no-session", HOME=str(self.cwd))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.calls(), [["ls", "--no-input"]])
+        self.assertFalse(self.state.exists())
+        self.assertFalse((self.cwd / ".agents").exists())
+
     def test_prompt_mode_payload_is_not_rpc(self):
         for args in (["--prompt", "--mode rpc"], ["--", "--mode", "rpc"],
                      ["say --mode rpc literally"]):
