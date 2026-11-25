@@ -1,18 +1,260 @@
 #!/usr/bin/env bash
+# Host wrapper: native Pi TUI and piped RPC, sharing host-managed skills.
 set -euo pipefail
 
-DIR_NAME="$(basename "$PWD" | tr -cs 'a-zA-Z0-9.-' '-' | sed 's/^-//;s/-$//')"
-SANDBOX_NAME="pi-${DIR_NAME:-workspace}"
+fail() { printf 'pi-sbx: %s\n' "$*" >&2; exit 1; }
 
-SANDBOXES="$(sbx ls)"
-if ! printf '%s\n' "$SANDBOXES" | awk -v name="$SANDBOX_NAME" '
+DIR_NAME="$(basename "$PWD" | tr -cs 'a-zA-Z0-9.-' '-' | sed 's/^-//;s/-$//')"
+SANDBOX_NAME="${SBX_PI_SANDBOX_NAME:-pi-${DIR_NAME:-workspace}}"
+[[ "$SANDBOX_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9]$ ]] || fail 'invalid sandbox name'
+CACHE_DIR="${SBX_PI_VERSION_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/pi-sbx/versions}"
+VERSION_FILE="$CACHE_DIR/$SANDBOX_NAME.version"
+VERSION_NUMBER='(0|[1-9][0-9]*)'
+VERSION_PRERELEASE='(0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)'
+SEMVER="^$VERSION_NUMBER\\.$VERSION_NUMBER\\.$VERSION_NUMBER(-$VERSION_PRERELEASE(\\.$VERSION_PRERELEASE)*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?$"
+
+RPC=0
+NO_SKILLS=0
+SESSION_DIR_SET=0
+VERSION_REQUESTED=0
+# Consume value-bearing built-in options so prompts such as '--mode' are not
+# mistaken for mode selectors. Stop at Pi's literal-argument delimiter.
+classify_args() {
+  # Subcommands have their own option grammar; do not reinterpret their flags.
+  case "${1:-}" in install|remove|uninstall|update|list|config|auth|mcp) return 0 ;; esac
+  while (( $# )); do
+    case "$1" in
+      --) break ;;
+      --version|-v) VERSION_REQUESTED=1 ;;
+      --mode)
+        if (( $# > 1 )); then
+          [[ "$2" != rpc ]] || RPC=1
+          [[ "$2" == rpc ]] || RPC=0
+          shift
+        fi ;;
+      --no-skills|-ns) NO_SKILLS=1 ;;
+      --session-dir)
+        SESSION_DIR_SET=1
+        if (( $# > 1 )); then shift; fi ;;
+      --provider|--model|--api-key|--thinking|--models|--session|--session-id|--fork|--name|-n|--tools|-t|--exclude-tools|-xt|--extension|-e|--skill|--prompt-template|--theme|--use-theme|--system-prompt|--append-system-prompt|--tui-mode|--export)
+        if (( $# > 1 )); then shift; fi ;;
+    esac
+    shift
+  done
+}
+classify_args "$@"
+
+# These paths deliberately precede ALL sbx calls and directory creation.
+if (( VERSION_REQUESTED )); then
+  VERSION=''
+  if [[ -r "$VERSION_FILE" ]]; then
+    IFS= read -r VERSION < "$VERSION_FILE" || true
+  fi
+  if [[ "$VERSION" =~ $SEMVER ]]; then
+    printf '%s\n' "$VERSION"
+    exit 0
+  fi
+  fail "version unavailable for $SANDBOX_NAME; start Pi normally or use --sbx-refresh-version on an existing sandbox"
+fi
+if [[ $# == 1 && "$1" == --sbx-clear-version ]]; then
+  rm -f -- "$VERSION_FILE"
+  exit 0
+fi
+
+REFRESH_ONLY=0
+[[ $# != 1 || "$1" != --sbx-refresh-version ]] || REFRESH_ONLY=1
+# Even a failed lookup must invalidate an explicitly refreshed cache.
+if (( REFRESH_ONLY )); then rm -f -- "$VERSION_FILE"; fi
+SANDBOXES="$(sbx ls --no-input </dev/null)"
+EXISTS=0
+if printf '%s\n' "$SANDBOXES" | awk -v name="$SANDBOX_NAME" '
   $1 == name { found = 1 }
   END { exit !found }
 '; then
-  sbx run -d --name "$SANDBOX_NAME" \
-    "git+https://github.com/gibenez/sbx-kits.git#dir=pi-dev" \
-    --kit-arg llmapi_domain="your.llmapi.domain" \
-    "$PWD" /var/folders/_j >/dev/null
+  EXISTS=1
+fi
+if (( ! EXISTS )); then rm -f -- "$VERSION_FILE"; fi
+if (( REFRESH_ONLY && ! EXISTS )); then
+  fail "sandbox $SANDBOX_NAME does not exist; version refresh will not create it"
+fi
+if (( ! EXISTS )) && [[ "${SBX_PI_REQUIRE_EXISTING:-0}" == 1 ]]; then
+  fail "sandbox $SANDBOX_NAME does not exist; SBX_PI_REQUIRE_EXISTING forbids creation"
 fi
 
-exec sbx run --name "$SANDBOX_NAME" -- "$@"
+# exec does not source the sandbox's persistent environment automatically.
+# Keep any shell-setup diagnostics away from the RPC stdout stream.
+PI_EXEC='if [[ -r /etc/sandbox-persistent.sh ]]; then source /etc/sandbox-persistent.sh >&2; fi; exec pi "$@"'
+PI_ENV='PI_CODING_AGENT_DIR=/home/agent/.pi/agent'
+refresh_version() {
+  local version temporary
+  # Clear first: a failed refresh must not keep advertising an older release.
+  rm -f -- "$VERSION_FILE" || return 1
+  if ! version="$(sbx exec --no-input --env "$PI_ENV" -- "$SANDBOX_NAME" bash -c "$PI_EXEC" pi --version </dev/null)"; then
+    return 1
+  fi
+  version="${version%$'\r'}"
+  [[ "$version" =~ $SEMVER ]] || return 1
+  (
+    umask 077
+    mkdir -p -- "$CACHE_DIR" || exit 1
+    temporary="$(mktemp "$CACHE_DIR/.${SANDBOX_NAME}.XXXXXXXX")" || exit 1
+    if ! printf '%s\n' "$version" > "$temporary" || ! mv -f -- "$temporary" "$VERSION_FILE"; then
+      rm -f -- "$temporary"
+      exit 1
+    fi
+  ) || return 1
+}
+if (( REFRESH_ONLY )); then
+  refresh_version || fail "could not verify installed Pi version in $SANDBOX_NAME"
+  IFS= read -r VERSION < "$VERSION_FILE"
+  printf '%s\n' "$VERSION"
+  exit 0
+fi
+
+# Context-free Orca probes may run in home. Never provision a sandbox whose
+# primary workspace would accidentally expose the whole home directory.
+if (( RPC && ! EXISTS )) && [[ "$PWD" -ef "$HOME" ]]; then
+  fail 'refusing to create an RPC sandbox in the home directory; open a project chat instead'
+fi
+
+HOST_SKILLS="${SBX_PI_SKILLS_DIR:-$HOME/.agents/skills}"
+STATE_ROOT="${SBX_PI_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/pi-sbx}"
+# Mount syntax uses ':' as a separator, without an escaping convention.
+[[ "$HOST_SKILLS" != *:* && "$STATE_ROOT" != *:* && "$PWD" != *:* ]] || fail 'workspace, skill and state paths must not contain colons'
+(
+  umask 077
+  mkdir -p -- "$HOST_SKILLS" "$STATE_ROOT/$SANDBOX_NAME/sessions"
+)
+HOST_SKILLS="$(cd "$HOST_SKILLS" && pwd -P)"
+STATE_DIR="$(cd "$STATE_ROOT/$SANDBOX_NAME" && pwd -P)"
+SKILL_TARGET=/mnt/pi-host-skills
+
+if (( ! EXISTS )); then
+  WORKSPACES=("$PWD" "$HOST_SKILLS:$SKILL_TARGET:ro" "$STATE_DIR")
+  # Keep the original macOS temporary-directory share when present.
+  [[ ! -d /var/folders/_j ]] || WORKSPACES+=(/var/folders/_j)
+  sbx run --no-input -d --name "$SANDBOX_NAME" \
+    "${SBX_PI_KIT:-git+https://github.com/gibenez/sbx-kits.git#dir=pi-dev}" \
+    --kit-arg "llmapi_domain=${SBX_PI_LLMAPI_DOMAIN:-your.llmapi.domain}" \
+    "${WORKSPACES[@]}" </dev/null >/dev/null
+  (umask 077; printf '%s\n' "$HOST_SKILLS" > "$STATE_DIR/.skills-source")
+fi
+[[ -r "$STATE_DIR/.skills-source" ]] || fail "sandbox $SANDBOX_NAME has no wrapper mount record; migrate it explicitly (see pi-dev/README.md)"
+IFS= read -r MOUNTED_SKILLS < "$STATE_DIR/.skills-source"
+[[ "$MOUNTED_SKILLS" == "$HOST_SKILLS" ]] || fail 'skill source changed; an existing sandbox mount cannot be retargeted by reattaching'
+
+# Fail closed for old sandboxes rather than silently falling back to their
+# private skills or returning host-unreadable sessions. The marker proves the
+# state directory is shared, not merely present in the sandbox filesystem.
+MOUNT_PROBE="$(umask 077; mktemp "$STATE_DIR/.mount-check.XXXXXXXX")"
+# Permissions alone cannot distinguish a read-only mount from chmod 555 on a
+# writable tree. Check the Linux mount table, not just access(2).
+MOUNT_CHECK='[[ -d /mnt/pi-host-skills && -r "$1" ]] || exit 1
+printf "%s\n" shared > "$1" || exit 1
+while IFS=" " read -r id parent device root target options rest; do
+  if [[ "$target" == /mnt/pi-host-skills && ",$options," == *,ro,* ]]; then exit 0; fi
+done < /proc/self/mountinfo
+exit 1'
+if ! sbx exec --no-input -- "$SANDBOX_NAME" bash -c "$MOUNT_CHECK" \
+  pi-sbx-check "$MOUNT_PROBE" </dev/null >/dev/null || [[ "$(< "$MOUNT_PROBE")" != shared ]]; then
+  rm -f -- "$MOUNT_PROBE"
+  fail "sandbox $SANDBOX_NAME lacks the expected read-only skills/shared state mounts; migrate it explicitly (see pi-dev/README.md)"
+fi
+rm -f -- "$MOUNT_PROBE"
+
+# Normal startup may take time; ADE version probes above never reach this call.
+# A self-update must not leave the PRE-update release cached after exec.
+if [[ "${1:-}" == update ]]; then
+  rm -f -- "$VERSION_FILE"
+elif ! refresh_version; then
+  printf 'pi-sbx: could not cache installed Pi version; continuing without version metadata\n' >&2
+fi
+
+PI_ARGS=()
+# Keep Pi's package/auth subcommands in argv[0], as required by its CLI parser.
+PACKAGE_COMMAND=0
+case "${1:-}" in install|remove|uninstall|update|list|config|auth|mcp) PACKAGE_COMMAND=1 ;; esac
+if (( ! NO_SKILLS && ! PACKAGE_COMMAND )); then
+  PI_ARGS+=(--skill "$SKILL_TARGET")
+fi
+if (( ! RPC )); then
+  exec sbx run --name "$SANDBOX_NAME" --workdir "$PWD" --env "$PI_ENV" -- ${PI_ARGS[@]+"${PI_ARGS[@]}"} "$@"
+fi
+
+# Same-path state sharing makes returned session paths readable by Orca. Keep
+# sandbox account configuration private; do not forward the host account dir.
+(( SESSION_DIR_SET )) || PI_ARGS+=(--session-dir "$STATE_DIR/sessions")
+
+# Orca also injects host-side instructions/extensions/linked skills. Snapshot
+# explicit resources outside the workspace into the shared state mount. This
+# is launch-resource delivery, not automatic skill-picker synchronization.
+RESOURCE_ROOT=''
+RESOURCE_INDEX=0
+stage_resource() {
+  local value="$1" path destination original_name link depth=0
+  STAGED_PATH="$value"
+  path="$value"
+  [[ "$path" == /* ]] || path="$PWD/$path"
+  [[ -e "$path" ]] || return 0 # Inline prompts, built-ins, or sandbox paths.
+  while [[ "$path" != / && "$path" == */ ]]; do path="${path%/}"; done
+  original_name="$(basename "$path")"
+  while [[ -L "$path" ]]; do
+    depth=$((depth + 1))
+    (( depth <= 40 )) || fail "too many resource symlinks: $value"
+    link="$(readlink "$path")"
+    if [[ "$link" == /* ]]; then path="$link"; else path="$(dirname "$path")/$link"; fi
+  done
+  if [[ -d "$path" ]]; then
+    path="$(cd "$path" && pwd -P)"
+  else
+    path="$(cd "$(dirname "$path")" && pwd -P)/$(basename "$path")"
+  fi
+  case "$path" in
+    "$HOST_SKILLS") STAGED_PATH="$SKILL_TARGET"; return 0 ;;
+    "$HOST_SKILLS"/*) STAGED_PATH="$SKILL_TARGET/${path#"$HOST_SKILLS"/}"; return 0 ;;
+    "$PWD"/*|"$PWD"|"$STATE_DIR"/*|"$STATE_DIR") STAGED_PATH="$path"; return 0 ;;
+  esac
+  [[ "$path" != / && "$STATE_DIR" != "$path"/* ]] || fail "cannot snapshot resource containing wrapper state: $value"
+  if [[ -z "$RESOURCE_ROOT" ]]; then
+    RESOURCE_ROOT="$(umask 077; mktemp -d "$STATE_DIR/resources.XXXXXXXX")"
+  fi
+  RESOURCE_INDEX=$((RESOURCE_INDEX + 1))
+  destination="$RESOURCE_ROOT/$RESOURCE_INDEX"
+  mkdir -- "$destination"
+  # Resolve the requested root, but preserve links WITHIN directory snapshots:
+  # dereferencing an arbitrary nested link could copy home/state recursively.
+  # External link targets/dependencies still require an accessible mount.
+  if ! cp -RP -- "$path" "$destination/$original_name"; then
+    rm -rf -- "$destination"
+    fail "could not snapshot resource: $value"
+  fi
+  STAGED_PATH="$destination/$original_name"
+}
+RPC_ARGS=()
+while (( $# )); do
+  case "$1" in
+    --) RPC_ARGS+=("$@"); break ;;
+    --extension|-e|--skill|--prompt-template|--theme|--system-prompt|--append-system-prompt)
+      FLAG="$1"
+      RPC_ARGS+=("$FLAG")
+      shift
+      if (( $# )); then
+        stage_resource "$1"
+        RPC_ARGS+=("$STAGED_PATH")
+        shift
+      fi ;;
+    --session-dir)
+      # Custom locations need an existing mount. Never silently create a host
+      # path that might be private to the sandbox or intended read-only.
+      RPC_ARGS+=("$1")
+      shift
+      if (( $# )); then RPC_ARGS+=("$1"); shift; fi ;;
+    --provider|--model|--api-key|--thinking|--models|--session|--session-id|--fork|--name|-n|--tools|-t|--exclude-tools|-xt|--use-theme|--tui-mode|--mode|--export)
+      RPC_ARGS+=("$1")
+      shift
+      if (( $# )); then RPC_ARGS+=("$1"); shift; fi ;;
+    *) RPC_ARGS+=("$1"); shift ;;
+  esac
+done
+exec sbx exec --no-input -i --workdir "$PWD" --env "$PI_ENV" -- \
+  "$SANDBOX_NAME" bash -c "$PI_EXEC" pi ${PI_ARGS[@]+"${PI_ARGS[@]}"} "${RPC_ARGS[@]}"

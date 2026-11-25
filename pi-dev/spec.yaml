@@ -18,8 +18,8 @@ permissions:
   network:
     allow:
       - "${{ kit.args.llmapi_domain }}"
-      # pi's runtime package installs (extensions, skills, prompt templates,
-      # themes) and the packages named in settings, fetched on startup.
+      # Pi's runtime package installs (extensions, prompt templates, themes)
+      # and the packages named in settings. Skills are managed on the host.
       - registry.npmjs.org
 
 credentials:
@@ -50,17 +50,9 @@ setup:
       user: "1000"
       description: Install Pi Subagents Lite
 
-    # Dev tools and skills
-    - command: npx -y skills@latest add mattpocock/skills -g -y $(curl -s https://raw.githubusercontent.com/mattpocock/skills/main/.claude-plugin/plugin.json | jq -r '.skills[] | split("/") | last' | xargs -n1 printf -- '-s %s ')
-      user: "1000"
-      description: Install Matt Pocock Skills
-    - command: npx -y skills@latest add https://github.com/only-cli/oc -g -y --skill web-browsing-cli
-      user: "1000"
-      description: Install OnlyCli Skill
-    # The upstream skill documents CLI installation; defer it until first use.
-    - command: npx -y skills@latest add https://github.com/microsoft/playwright-cli -g -y --skill playwright-cli
-      user: "1000"
-      description: Install Playwright Skill
+    # Skills are installed once on the host in ~/.agents/skills and shared
+    # read-only by the wrapper. Do not install private copies in the sandbox.
+    # Existing sandbox skills are never removed automatically.
 
   startup:
     - command:
