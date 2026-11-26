@@ -125,48 +125,66 @@ fi
 
 HOST_SKILLS="${SBX_PI_SKILLS_DIR:-$HOME/.agents/skills}"
 STATE_ROOT="${SBX_PI_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/pi-sbx}"
+# Match Pi's cwd buckets and Orca's host transcript scanner. Share only this
+# project's bucket, never the host account's auth/config or other projects.
+HOST_AGENT_DIR="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
+[[ "$HOST_AGENT_DIR" == /* ]] || fail 'host PI_CODING_AGENT_DIR must be absolute'
+SESSION_BUCKET="--$(printf '%s' "${PWD#/}" | tr '/\\:' '---')--"
+SESSION_DIR="$HOST_AGENT_DIR/sessions/$SESSION_BUCKET"
 # Mount syntax uses ':' as a separator, without an escaping convention.
-[[ "$HOST_SKILLS" != *:* && "$STATE_ROOT" != *:* && "$PWD" != *:* ]] || fail 'workspace, skill and state paths must not contain colons'
+[[ "$HOST_SKILLS" != *:* && "$STATE_ROOT" != *:* && "$PWD" != *:* && "$HOST_AGENT_DIR" != *:* ]] || fail 'workspace, skill, state and account paths must not contain colons'
+[[ ! -L "$SESSION_DIR" ]] || fail 'session bucket must be a real directory for Orca discovery'
 (
   umask 077
-  mkdir -p -- "$HOST_SKILLS" "$STATE_ROOT/$SANDBOX_NAME/sessions"
+  mkdir -p -- "$HOST_SKILLS" "$STATE_ROOT/$SANDBOX_NAME" "$SESSION_DIR"
 )
 HOST_SKILLS="$(cd "$HOST_SKILLS" && pwd -P)"
 STATE_DIR="$(cd "$STATE_ROOT/$SANDBOX_NAME" && pwd -P)"
+SESSION_DIR="$(cd "$SESSION_DIR" && pwd -P)"
 SKILL_TARGET=/mnt/pi-host-skills
 
 if (( ! EXISTS )); then
-  WORKSPACES=("$PWD" "$HOST_SKILLS:$SKILL_TARGET:ro" "$STATE_DIR")
+  WORKSPACES=("$PWD" "$HOST_SKILLS:$SKILL_TARGET:ro" "$STATE_DIR" "$SESSION_DIR")
   # Keep the original macOS temporary-directory share when present.
   [[ ! -d /var/folders/_j ]] || WORKSPACES+=(/var/folders/_j)
   sbx run --no-input -d --name "$SANDBOX_NAME" \
     "${SBX_PI_KIT:-git+https://github.com/gibenez/sbx-kits.git#dir=pi-dev}" \
     --kit-arg "llmapi_domain=${SBX_PI_LLMAPI_DOMAIN:-your.llmapi.domain}" \
     "${WORKSPACES[@]}" </dev/null >/dev/null
-  (umask 077; printf '%s\n' "$HOST_SKILLS" > "$STATE_DIR/.skills-source")
+  (umask 077
+    printf '%s\n' "$HOST_SKILLS" > "$STATE_DIR/.skills-source"
+    printf '%s\n' "$SESSION_DIR" > "$STATE_DIR/.sessions-dir")
 fi
 [[ -r "$STATE_DIR/.skills-source" ]] || fail "sandbox $SANDBOX_NAME has no wrapper mount record; migrate it explicitly (see pi-dev/README.md)"
 IFS= read -r MOUNTED_SKILLS < "$STATE_DIR/.skills-source"
 [[ "$MOUNTED_SKILLS" == "$HOST_SKILLS" ]] || fail 'skill source changed; an existing sandbox mount cannot be retargeted by reattaching'
 
+[[ -r "$STATE_DIR/.sessions-dir" ]] || fail "sandbox $SANDBOX_NAME has no discoverable session mount; migrate it explicitly (see pi-dev/README.md)"
+IFS= read -r MOUNTED_SESSIONS < "$STATE_DIR/.sessions-dir"
+[[ "$MOUNTED_SESSIONS" == "$SESSION_DIR" ]] || fail 'session bucket changed; use the original workspace/account or migrate the sandbox explicitly'
+
 # Fail closed for old sandboxes rather than silently falling back to their
 # private skills or returning host-unreadable sessions. The marker proves the
 # state directory is shared, not merely present in the sandbox filesystem.
 MOUNT_PROBE="$(umask 077; mktemp "$STATE_DIR/.mount-check.XXXXXXXX")"
+SESSION_PROBE="$(umask 077; mktemp "$SESSION_DIR/.mount-check.XXXXXXXX")"
+trap 'rm -f -- "$MOUNT_PROBE" "$SESSION_PROBE"' EXIT
 # Permissions alone cannot distinguish a read-only mount from chmod 555 on a
 # writable tree. Check the Linux mount table, not just access(2).
-MOUNT_CHECK='[[ -d /mnt/pi-host-skills && -r "$1" ]] || exit 1
+MOUNT_CHECK='[[ -d /mnt/pi-host-skills && -r "$1" && -r "$2" ]] || exit 1
 printf "%s\n" shared > "$1" || exit 1
+printf "%s\n" shared > "$2" || exit 1
 while IFS=" " read -r id parent device root target options rest; do
   if [[ "$target" == /mnt/pi-host-skills && ",$options," == *,ro,* ]]; then exit 0; fi
 done < /proc/self/mountinfo
 exit 1'
 if ! sbx exec --no-input -- "$SANDBOX_NAME" bash -c "$MOUNT_CHECK" \
-  pi-sbx-check "$MOUNT_PROBE" </dev/null >/dev/null || [[ "$(< "$MOUNT_PROBE")" != shared ]]; then
-  rm -f -- "$MOUNT_PROBE"
+  pi-sbx-check "$MOUNT_PROBE" "$SESSION_PROBE" </dev/null >/dev/null || [[ "$(< "$MOUNT_PROBE")" != shared || "$(< "$SESSION_PROBE")" != shared ]]; then
+  rm -f -- "$MOUNT_PROBE" "$SESSION_PROBE"
   fail "sandbox $SANDBOX_NAME lacks the expected read-only skills/shared state mounts; migrate it explicitly (see pi-dev/README.md)"
 fi
-rm -f -- "$MOUNT_PROBE"
+rm -f -- "$MOUNT_PROBE" "$SESSION_PROBE"
+trap - EXIT
 
 # Normal startup may take time; ADE version probes above never reach this call.
 # A self-update must not leave the PRE-update release cached after exec.
@@ -183,6 +201,11 @@ case "${1:-}" in install|remove|uninstall|update|list|config|auth|mcp) PACKAGE_C
 if (( ! NO_SKILLS && ! PACKAGE_COMMAND )); then
   PI_ARGS+=(--skill "$SKILL_TARGET")
 fi
+# One bucket for interactive and RPC sessions; print/subcommands keep their
+# existing persistence semantics. Explicit --session-dir remains untouched.
+if (( ! PRINT && ! PACKAGE_COMMAND && ! SESSION_DIR_SET )); then
+  PI_ARGS+=(--session-dir "$SESSION_DIR")
+fi
 if (( ! RPC )); then
   # Orca names chats via --print --mode text, with the prompt on stdin.
   # It needs raw pipes too, but not RPC session storage or resource rewriting.
@@ -191,10 +214,6 @@ if (( ! RPC )); then
   fi
   exec sbx run --name "$SANDBOX_NAME" --workdir "$PWD" --env "$PI_ENV" -- ${PI_ARGS[@]+"${PI_ARGS[@]}"} "$@"
 fi
-
-# Same-path state sharing makes returned session paths readable by Orca. Keep
-# sandbox account configuration private; do not forward the host account dir.
-(( SESSION_DIR_SET )) || PI_ARGS+=(--session-dir "$STATE_DIR/sessions")
 
 # Orca also injects host-side instructions/extensions/linked skills. Snapshot
 # explicit resources outside the workspace into the shared state mount. This

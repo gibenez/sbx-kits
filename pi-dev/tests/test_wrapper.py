@@ -42,7 +42,10 @@ if args[0] == "exec" and "pi-sbx-check" in args:
     if status:
         sys.stderr.write("fake missing shared mount\n")
     elif not os.environ.get("MOCK_MOUNT_NO_WRITE"):
-        Path(args[-1]).write_text("shared\n")
+        for index, path in enumerate(args[args.index("pi-sbx-check") + 1:]):
+            if index == 1 and os.environ.get("MOCK_SESSION_NO_WRITE"):
+                continue
+            Path(path).write_text("shared\n")
     sys.exit(status)
 if version_call:
     sys.stdout.write(os.environ.get("FAKE_SBX_VERSION", "1.2.3\n"))
@@ -104,7 +107,88 @@ class WrapperTests(unittest.TestCase):
         state = state_root / name
         (state / "sessions").mkdir(parents=True, exist_ok=True)
         (state / ".skills-source").write_text(str(skills.resolve()) + "\n")
+        sessions = self.session_bucket(env)
+        sessions.mkdir(parents=True, exist_ok=True)
+        (state / ".sessions-dir").write_text(str(sessions.resolve()) + "\n")
         env.setdefault("FAKE_SBX_LS", name + " running\n")
+
+    def session_bucket(self, env=None):
+        env = env or self.env
+        agent = Path(env.get("PI_CODING_AGENT_DIR", str(Path(env["HOME"]) / ".pi" / "agent")))
+        encoded = "--" + str(self.cwd.resolve()).lstrip("/").replace("/", "-").replace(":", "-") + "--"
+        return agent / "sessions" / encoded
+
+    def test_chat_and_tui_share_discoverable_project_bucket(self):
+        for args in (("--mode", "rpc"), ("hello",)):
+            with self.subTest(args=args):
+                result = self.run_wrapper(*args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assert_option(self.launches()[-1], "--session-dir", str(self.session_bucket()))
+        self.assertIn(str(self.session_bucket()), self.creations()[0])
+        self.assertNotIn(str(self.home / ".pi" / "agent"), self.creations()[0])
+
+    def test_host_account_override_controls_discovery_location_not_sandbox_config(self):
+        account = self.root / "custom account"
+        result = self.run_wrapper("--mode", "rpc", PI_CODING_AGENT_DIR=str(account))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        bucket = self.session_bucket({**self.env, "PI_CODING_AGENT_DIR": str(account)})
+        self.assertIn(str(bucket), self.creations()[0])
+        self.assert_option(self.launches()[-1], "--session-dir", str(bucket))
+        self.assertIn("PI_CODING_AGENT_DIR=/home/agent/.pi/agent", self.launches()[-1])
+
+    def test_old_sandbox_requires_session_mount_migration(self):
+        self.setup_existing(self.env)
+        (self.state / self.name / ".sessions-dir").unlink()
+        result = self.run_wrapper("--mode", "rpc")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("migrate", result.stderr)
+        self.assertEqual(self.launches(), [])
+        self.assertEqual(self.creations(), [])
+
+    def test_session_mount_requires_sandbox_write_visible_on_host(self):
+        result = self.run_wrapper("--mode", "rpc", existing=True, MOCK_SESSION_NO_WRITE="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.launches(), [])
+        self.assertFalse(list(self.session_bucket().glob(".mount-check.*")))
+        self.assertFalse(list((self.state / self.name).glob(".mount-check.*")))
+
+    def test_changed_host_account_cannot_retarget_existing_mount(self):
+        self.setup_existing(self.env)
+        result = self.run_wrapper("--mode", "rpc", PI_CODING_AGENT_DIR=str(self.root / "other account"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("session bucket changed", result.stderr)
+        self.assertEqual(self.launches(), [])
+        self.assertEqual(self.creations(), [])
+
+    def test_session_bucket_symlink_is_rejected_for_discovery(self):
+        target = self.root / "external transcripts"
+        target.mkdir()
+        bucket = self.session_bucket()
+        bucket.parent.mkdir(parents=True)
+        bucket.symlink_to(target, target_is_directory=True)
+        result = self.run_wrapper("--mode", "rpc")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("real directory", result.stderr)
+        self.assertEqual(self.creations(), [])
+
+    def test_existing_transcripts_are_not_moved_or_overwritten(self):
+        self.setup_existing(self.env)
+        old = self.state / self.name / "sessions" / "old.jsonl"
+        current = self.session_bucket() / "current.jsonl"
+        old.write_text("old transcript\n")
+        current.write_text("current transcript\n")
+        result = self.run_wrapper("--mode", "rpc")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(old.read_text(), "old transcript\n")
+        self.assertEqual(current.read_text(), "current transcript\n")
+
+    def test_tui_preserves_custom_session_dir(self):
+        custom = str(self.cwd / "custom sessions")
+        result = self.run_wrapper("--session-dir", custom)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        final = self.launches()[-1]
+        self.assertEqual(final.count("--session-dir"), 1)
+        self.assert_option(final, "--session-dir", custom)
 
     def run_wrapper(self, *args, stdin="", existing=False, **env):
         env = {**self.env, **env}
@@ -485,7 +569,7 @@ class WrapperTests(unittest.TestCase):
         final = self.launches()[-1]
         self.assertIn("/mnt/pi-host-skills/review skill/SKILL.md", final)
         self.assertNotIn(str(skill), final)
-        self.assert_option(final, "--session-dir", str(self.state / self.name / "sessions"))
+        self.assert_option(final, "--session-dir", str(self.session_bucket()))
         self.assertEqual(final[-len(original):], original)
 
     def test_rpc_preserves_explicit_session_directory_without_duplicate(self):
@@ -504,7 +588,7 @@ class WrapperTests(unittest.TestCase):
         state = self.root / "xdg-state" / "pi-sbx" / self.name
         self.assertTrue(state.is_dir())
         self.assertIn(str(state), self.creations()[0])
-        self.assert_option(self.launches()[-1], "--session-dir", str(state / "sessions"))
+        self.assert_option(self.launches()[-1], "--session-dir", str(self.session_bucket()))
 
     def test_skills_symlink_is_resolved_before_mounting(self):
         skills = self.root / "real skills"

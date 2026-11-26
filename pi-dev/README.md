@@ -34,9 +34,10 @@ Configuration:
 | `SBX_PI_LLMAPI_DOMAIN` | LLM API domain supplied as the kit's `llmapi_domain` argument. Set before creating a sandbox. |
 | `SBX_PI_SKILLS_DIR` | Optional host skill root; defaults to `$HOME/.agents/skills`. Custom locations must also be discoverable by your host UI if you need a pre-session skill picker. |
 | `SBX_PI_VERSION_CACHE_DIR` | Optional version-cache directory; defaults to `${XDG_CACHE_HOME:-$HOME/.cache}/pi-sbx/versions`. Separate from session/resource state. |
-| `SBX_PI_STATE_DIR` | Optional state root; defaults to `${XDG_STATE_HOME:-$HOME/.local/state}/pi-sbx`. Its per-sandbox `NAME` directory is shared read-write at the same absolute path for RPC sessions and staged resources. |
+| `SBX_PI_STATE_DIR` | Optional state root; defaults to `${XDG_STATE_HOME:-$HOME/.local/state}/pi-sbx`. Its per-sandbox `NAME` directory is shared read-write at the same absolute path for mount records and staged resources. Older wrappers also stored RPC sessions here; those files are left untouched. |
 | `SBX_PI_SANDBOX_NAME` | Optional sandbox-name override, useful for selecting a known sandbox identity. It does not mount a different current directory into an existing sandbox. |
 | `SBX_PI_REQUIRE_EXISTING` | Set to `1` to forbid provisioning during normal launches. Used by the opt-in live smoke test. |
+| `PI_CODING_AGENT_DIR` | Host Pi account root used to locate discoverable sessions; defaults to `$HOME/.pi/agent`. Must be absolute and match the account root Orca scans. Only the current project's session bucket is mounted; sandbox Pi still uses its private `/home/agent/.pi/agent` for config/auth. |
 
 ## Install skills once, on the host
 
@@ -67,9 +68,17 @@ The fixed target is intentional: `sbx` documents that additional mount targets m
 
 ### Existing sandbox migration is explicit
 
-The wrapper does **not** delete existing skills, uninstall packages, rewrite existing mounts, or recreate sandboxes automatically. An older sandbox may retain its private installed skills and lack both `/mnt/pi-host-skills` and the same-path per-sandbox state mount. **Existing sandboxes require explicit migration before relying on shared skills, staged resources, or host-readable RPC sessions.** Merely reattaching one does not retrofit either mount or the new kit settings. Normal startup refuses a sandbox without the wrapper's `.skills-source` record in shared state. It also verifies the configured source still matches that record, checks the skills target is an actual read-only Linux mount, and checks that a temporary state marker is readable and writable from both sides.
+The wrapper does **not** delete existing skills, uninstall packages, rewrite existing mounts, or recreate sandboxes automatically. An older sandbox may retain its private installed skills and lack both `/mnt/pi-host-skills` and the same-path per-sandbox state mount. **Existing sandboxes require explicit migration before relying on shared skills, staged resources, or host-readable RPC sessions.** Merely reattaching one does not retrofit either mount or the new kit settings. Normal startup refuses a sandbox without the wrapper's `.skills-source` and `.sessions-dir` records in shared state. It verifies the configured paths still match those records, checks the skills target is an actual read-only Linux mount, and checks that temporary markers in both state and the session bucket are readable and writable from both sides. **Sandboxes created by the earlier shared-state wrapper also need migration:** they lack the additional host Pi session-bucket mount. No kit/image change is required solely for this additional mount, but changing the installed wrapper cannot retrofit it.
 
 Before migrating, inspect and back up the existing sandbox's skills and other state. Manually reconcile any desired private skills into the host's canonical tree, resolve same-name conflicts, and check supporting files and symlinks. Then explicitly create a fresh sandbox through the updated wrapper with the updated local/published kit. For example, use `SBX_PI_SANDBOX_NAME=pi-project-shared pi` from the project to leave the old sandbox intact while validating the new one. Merely editing a mount record does not migrate a sandbox. For normal Orca launches, eventually migrate the default sandbox name or supply the matching workspace-specific override; do not globally point every project at the temporary test sandbox. Only remove old private copies or old sandboxes after verifying the shared versions and preserving any needed sessions/state. No automated deletion is provided.
+
+#### Preserve earlier conversations
+
+Stop active chats/TUIs before copying transcripts, and back up sandbox-private state before replacing any sandbox. Earlier RPC transcripts remain under `${SBX_PI_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/pi-sbx}/OLD_NAME/sessions/`; older TUI transcripts remain inside the old sandbox under `/home/agent/.pi/agent/sessions/` (normally in encoded cwd buckets).
+
+After explicitly creating the replacement through this wrapper, read its `.sessions-dir` record to find the new host bucket. Copy only the desired project's `.jsonl` transcripts there, retaining filenames, never overwriting a different existing transcript, and keeping the originals/backups. Inspect each transcript's session-header `cwd` to select the right project; do not copy every sandbox's files into one bucket. For TUI transcripts, export them from the old sandbox first using your installed `sbx` tooling. Do not copy sandbox auth/settings or make the whole host account writable in the sandbox. This wrapper does not perform historical imports automatically.
+
+Orca can then discover those copies in its history scan. Already-open Orca tabs may still point at the original path; keep the original files/state until those tabs are closed and the imported sessions have been verified. Avoid continuing both copies of the same session independently.
 
 ## Launch Pi
 
@@ -87,11 +96,23 @@ Metadata/provisioning calls use `--no-input` and closed stdin so they cannot con
 
 An RPC or explicit print invocation from the host home directory refuses to create a missing sandbox, avoiding a context-free background invocation accidentally provisioning one with the entire home as its workspace. It can still attach to an existing selected sandbox. This guard does not apply to native TUI launches; launch those from the intended project directory.
 
-One-shot print calls do not receive the RPC-only session directory or resource rewriting below. In particular, Orca's `--no-session` auto-naming calls do not persist a naming conversation. This routing change only requires updating the installed host wrapper; already migrated sandboxes do not need recreation.
+One-shot print calls do not receive the shared session-directory option or resource rewriting below. In particular, Orca's `--no-session` auto-naming calls do not persist a naming conversation. Print transport itself only requires a wrapper update; the shared history mount described below requires explicit migration of existing sandboxes.
 
-### RPC sessions and explicit launch resources
+### Shared session history and explicit RPC launch resources
 
-On creation, the wrapper mounts `SBX_PI_STATE_DIR/NAME` read-write at the same resolved absolute host path. RPC adds `--session-dir STATE/NAME/sessions` unless you supplied `--session-dir`, making returned session paths host-readable through that mount. An explicit session directory is passed unchanged and must already be visible at the intended path; the wrapper does not mount arbitrary custom session locations.
+Orca Chat's `/resume [search]` opens Orca's Agent Session History, not Pi's TUI picker. Orca discovers Pi transcripts by scanning the host Pi sessions root, with encoded cwd buckets for workspace filtering. A host-readable session at an arbitrary path is not automatically discoverable.
+
+On creation, the wrapper mounts only the current project's real session bucket read-write at the same resolved absolute host path:
+
+```text
+${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/sessions/--encoded-project-path--/
+```
+
+The encoding matches Pi: strip the first leading slash from cwd, replace slash/backslash/colon with `-`, and wrap in `--`. Both native TUI and RPC launches receive `--session-dir` pointing to this bucket. Their lead-session transcripts therefore share the same host-visible, Orca-discoverable storage. This does not redirect independently launched Pi processes or subagents that choose their own storage. Only this bucket is exposed, not host auth/config or all projects' history. The bucket must not be a symlink: Orca's directory walker skips symlink entries.
+
+The host account root must agree with the environment/configuration of the Orca execution runtime doing the scan; this may be a remote host rather than the UI laptop. Switching workspace/account on an existing sandbox is refused because it cannot retarget the existing mount. An explicit `--session-dir` is passed unchanged in both routes and must already be sandbox-visible; custom directories opt out of the default discovery layout.
+
+The wrapper also mounts `SBX_PI_STATE_DIR/NAME` read-write for mount records and staged resources, separately from transcripts.
 
 For RPC only, the wrapper processes explicit `--extension`/`-e`, `--skill`, `--prompt-template`, `--theme`, `--system-prompt`, and `--append-system-prompt` arguments:
 
@@ -100,7 +121,7 @@ For RPC only, the wrapper processes explicit `--extension`/`-e`, `--skill`, `--p
 - Other existing host files/directories are copied into a per-launch resources directory under the shared state mount, and the argument is rewritten to that snapshot. The requested root's symlink is resolved, but links within copied directories are preserved, not recursively dereferenced. A resource containing the state directory is rejected to prevent recursive copying.
 - Nonexistent host paths and inline values are passed unchanged; that does not make an otherwise unmounted sandbox path available.
 
-This is **scoped delivery of explicit RPC launch arguments**, not automatic skill-picker propagation or a live mirror of all host resources. Snapshots do not track subsequent host edits. A single extension file's sibling imports, dependencies outside a copied directory, absolute embedded paths, and required runtimes are not inferred or staged automatically. Native TUI launch does not perform this resource staging. State contains session data and resource snapshots; protect it as application data and inspect it before any manual cleanup.
+This is **scoped delivery of explicit RPC launch arguments**, not automatic skill-picker propagation or a live mirror of all host resources. Snapshots do not track subsequent host edits. A single extension file's sibling imports, dependencies outside a copied directory, absolute embedded paths, and required runtimes are not inferred or staged automatically. Native TUI launch does not perform this resource staging. Both host session buckets and wrapper state (including older transcripts and resource snapshots) are sensitive application data; inspect them before any manual cleanup.
 
 Host bridge environment variables, socket access, and dynamic integration dependencies are not generally forwarded or solved by this wrapper. These remain live integration blockers to check, alongside stdin/stdout fidelity, EOF/cancellation, terminal behavior, skill loading, and script execution. Setup/probe diagnostics belong on stderr, not JSONL stdout. No live `sbx`/Orca compatibility test has been performed here.
 
@@ -147,6 +168,6 @@ Finally verify in your installed Orca:
 2. Before sending any message, open the skill picker and confirm a host skill appears.
 3. Send a trusted skill request; verify it reads `/mnt/pi-host-skills` and runs any supporting scripts inside the sandbox with the required dependencies.
 4. Confirm version probes complete promptly and no home-directory sandbox is created. A context-free model probe may be refused by the home guard; verify that your Orca release still allows project chat/model selection.
-5. Close/reopen Chat and test resume, native TUI, stdin EOF, SIGTERM, and absence of orphaned sandbox Pi processes. The smoke check's local exit alone does not prove remote cleanup.
+5. Send a message in Chat, close it, and use `/resume` from another chat in the same workspace; confirm the saved conversation appears and continues. Create a native TUI session through the wrapper and verify it also appears. Verify imported older transcripts separately. Test stdin EOF, SIGTERM, and absence of orphaned sandbox Pi processes. The smoke check's local exit alone does not prove remote cleanup.
 
 No live `sbx` or Orca check was run in the implementation environment because `sbx` was unavailable. macOS Bash 3 compatibility is intended but was not executed here. Source investigations and pinned references are in [research/orca-chat-investigation.md](research/orca-chat-investigation.md) and [research/orca-skill-propagation.md](research/orca-skill-propagation.md).
