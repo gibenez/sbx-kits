@@ -1,5 +1,13 @@
 # pi-dev
 
+Quick install on the host (requires `sbx`, `curl`, and `sudo`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/gibenez/sbx-kits/main/pi-dev/install.sh | bash
+```
+
+The installer asks for your LLM API domain, offering the existing environment value (or a literal value already in your shell configuration) as the default. It detects your login shell via `$SHELL` and saves `SBX_PI_LLMAPI_DOMAIN` in `~/.zshrc` or `~/.bashrc`, backing up an existing file to the same path with `.pi-sbx.bak` appended. Open a new shell or run the printed `source` command, set your API key with `sbx secret set llmapi`, then run `pi` from your project directory. If your orchestrator does not load your shell configuration, set the variable in its environment too. This installs the published wrapper and uses the published remote kit.
+
 A sandbox development kit for the Pi terminal coding agent, with:
 
 - Generic LLM API support (API key only, no OAuth).
