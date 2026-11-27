@@ -9,12 +9,14 @@
           "id": "Swift-1.5-Qwen3.8-27B-VectorCut-MLX-8bit",
           "reasoning": true,
           "contextWindow": 262144,
+          "maxTokens": 32768,
           "input": ["text", "image"]
         },
         {
           "id": "Swift-1.5-Qwen3.8-27B-Q6_K_L",
           "reasoning": true,
           "contextWindow": 262144,
+          "maxTokens": 32768,
           "input": ["text", "image"]
         },
         {

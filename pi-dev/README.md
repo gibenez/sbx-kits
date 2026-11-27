@@ -164,6 +164,8 @@ The catalog is read from `files/home/.pi/agent/models.json` under `SBX_PI_KIT`. 
 
 The picker shows what the kit declares, not whether a particular existing sandbox has those models or working credentials. Once a chat acquires Pi, its live model list comes from the sandbox. This route does not change `pi --version` or claim a sandbox Pi version.
 
+On this kit's Anthropic Messages route, Pi sends a token budget for the Qwen thinking levels, not a named provider effort. The Qwen entries request up to 32,768 total output tokens so Pi's 16,384-token `high` thinking budget leaves room for the answer. The gateway may enforce a lower limit.
+
 ## Validation
 
 Run the offline regression suite from this repository's root:
