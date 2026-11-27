@@ -519,6 +519,24 @@ class WrapperTests(unittest.TestCase):
                     self.assertNotIn("--skill", final)
                     self.assertIn(flag, final)
 
+    def test_update_wrapper_runs_published_installer_without_sbx(self):
+        curl = self.bin / "curl"
+        curl.write_text("#!/bin/sh\n"
+                        'for url; do :; done\n'
+                        '[ "$url" = "$EXPECTED_URL" ] || exit 98\n'
+                        'printf "%s\\n" \'read -r input; printf "%s\\n" "$input"; exit 42\'\n'
+                        'exit "${DOWNLOAD_STATUS:-0}"\n')
+        env = dict(EXPECTED_URL="https://raw.githubusercontent.com/gibenez/sbx-kits/main/pi-dev/install.sh")
+        result = self.run_wrapper("--sbx-update", stdin="installer input\n", **env)
+        self.assertEqual(result.returncode, 42, result.stderr)
+        self.assertEqual(result.stdout, "installer input\n")
+        failed = self.run_wrapper("--sbx-update", stdin="must not run\n",
+                                  DOWNLOAD_STATUS="18", **env)
+        self.assertEqual(failed.returncode, 1)
+        self.assertEqual(failed.stdout, "")
+        self.assertIn("could not download", failed.stderr)
+        self.assert_offline()
+
     def test_home_catalog_uses_kit_revision_and_cached_projected_models_without_sbx(self):
         fixture = self.root / "models.json"
         fixture.write_text(json.dumps({"providers": {"main": {

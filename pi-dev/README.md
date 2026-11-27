@@ -8,6 +8,14 @@ curl -fsSL https://raw.githubusercontent.com/gibenez/sbx-kits/main/pi-dev/instal
 
 The installer asks for your LLM API domain, offering the existing environment value (or a literal value already in your shell configuration) as the default. It detects your login shell via `$SHELL` and saves `SBX_PI_LLMAPI_DOMAIN` in `~/.zshrc` or `~/.bashrc`, backing up an existing file to the same path with `.pi-sbx.bak` appended. Open a new shell or run the printed `source` command, set your API key with `sbx secret set llmapi`, then run `pi` from your project directory. If your orchestrator does not load your shell configuration, set the variable in its environment too. This installs the published wrapper and uses the published remote kit.
 
+To update an installed wrapper that already supports the command, run this from a terminal:
+
+```bash
+pi --sbx-update
+```
+
+This reruns the published installer above: it prompts for your LLM API domain and uses `sudo` to replace `/usr/local/bin/pi`. It does not start a sandbox or update Pi inside one. If you installed the wrapper to a different path manually, replace that copy manually; this command still installs to `/usr/local/bin/pi`. For an older wrapper without this command, use the quick-install command above once.
+
 A sandbox development kit for the Pi terminal coding agent, with:
 
 - Generic LLM API support (API key only, no OAuth).

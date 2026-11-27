@@ -4,6 +4,14 @@ set -euo pipefail
 
 fail() { printf 'pi-sbx: %s\n' "$*" >&2; exit 1; }
 
+# Update the host wrapper using the same published installer as a fresh install.
+if [[ $# == 1 && "$1" == --sbx-update ]]; then
+  installer="$(curl -q -fsSL https://raw.githubusercontent.com/gibenez/sbx-kits/main/pi-dev/install.sh)" ||
+    fail 'could not download the wrapper installer'
+  [[ -n "$installer" ]] || fail 'the wrapper installer download was empty'
+  exec bash -c "$installer"
+fi
+
 KIT_REF="${SBX_PI_KIT:-git+https://github.com/gibenez/sbx-kits.git#dir=pi-dev}"
 
 # Orca's standalone catalog process runs in HOME with exactly these args for
