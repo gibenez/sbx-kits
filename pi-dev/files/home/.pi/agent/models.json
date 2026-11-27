@@ -6,6 +6,13 @@
       "apiKey": "xxx",
       "models": [
         {
+          "id": "Qwen3.8-27B-pi-adapted-MLX-6bit",
+          "reasoning": true,
+          "compat": { "thinkingFormat": "qwen-chat-template" },
+          "contextWindow": 262144,
+          "input": ["text", "image"]
+        },
+        {
           "id": "Swift-1.5-Qwen3.8-27B-Q6_K_L",
           "reasoning": true,
           "compat": { "thinkingFormat": "qwen-chat-template" },
