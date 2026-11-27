@@ -12,7 +12,7 @@
           "input": ["text", "image"]
         },
         {
-          "id": "gpt-6.1-sol",
+          "id": "gpt-6.2-sol",
           "reasoning": true,
           "contextWindow": 500000,
           "input": ["text", "image"]
