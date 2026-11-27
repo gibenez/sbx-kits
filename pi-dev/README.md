@@ -148,6 +148,14 @@ Each maintenance command must be the sole argument. Cache-only `--version` (or `
 
 Use the same project directory or `SBX_PI_SANDBOX_NAME` override to select the intended sandbox. Refresh does not create a missing sandbox, but `sbx exec` may start a stopped one. A plain `--version` probe never creates even the host skill directory. Do not treat an npm registry `latest` response as the installed sandbox version. A cached version is not proof that RPC or skills work with your installed Pi, `sbx`, and orchestrator versions.
 
+## Orca model picker before the first message
+
+Set Orca’s Pi **Command** to the updated wrapper’s absolute path, with no prefix arguments. When Orca runs `--mode rpc --no-session` from the host home directory, the wrapper answers `get_state` and `get_available_models` itself. It never calls `sbx` on this route, rejects prompts, and doesn’t need host Pi or any new mount. Workspace chats still run real Pi in their normal sandboxes.
+
+The catalog is read from `files/home/.pi/agent/models.json` under `SBX_PI_KIT`. The published kit uses GitHub `main`; a public GitHub kit with `#ref=...&dir=...` uses the specified revision and directory. A local kit directory is read directly. The GitHub route requires host `python3` and `curl` on Orca’s PATH (a local kit only needs `python3`). GitHub catalogs are cached for one hour under `${XDG_CACHE_HOME:-$HOME/.cache}/pi-sbx/catalogs`; if a refresh fails, the last valid catalog for that URL is used. Only picker fields are returned and cached, not credentials, endpoints, or headers.
+
+The picker shows what the kit declares, not whether a particular existing sandbox has those models or working credentials. Once a chat acquires Pi, its live model list comes from the sandbox. This route does not change `pi --version` or claim a sandbox Pi version.
+
 ## Validation
 
 Run the offline regression suite from this repository's root:
@@ -175,7 +183,7 @@ Finally verify in your installed Orca:
 1. Configure Pi's Command to the installed wrapper's absolute path, with the intended wrapper environment. Use the normal New Chat UI, not a custom launcher.
 2. Before sending any message, open the skill picker and confirm a host skill appears.
 3. Send a trusted skill request; verify it reads `/mnt/pi-host-skills` and runs any supporting scripts inside the sandbox with the required dependencies.
-4. Confirm version probes complete promptly and no home-directory sandbox is created. A context-free model probe may be refused by the home guard; verify that your Orca release still allows project chat/model selection.
+4. In a fresh Pi chat, open the model picker before sending a message. Confirm it shows the kit’s models, and that no home-directory sandbox was created. Confirm version probes still complete promptly.
 5. Send a message in Chat, close it, and use `/resume` from another chat in the same workspace; confirm the saved conversation appears and continues. Create a native TUI session through the wrapper and verify it also appears. Verify imported older transcripts separately. Test stdin EOF, SIGTERM, and absence of orphaned sandbox Pi processes. The smoke check's local exit alone does not prove remote cleanup.
 
 No live `sbx` or Orca check was run in the implementation environment because `sbx` was unavailable. macOS Bash 3 compatibility is intended but was not executed here. Source investigations and pinned references are in [research/orca-chat-investigation.md](research/orca-chat-investigation.md) and [research/orca-skill-propagation.md](research/orca-skill-propagation.md).

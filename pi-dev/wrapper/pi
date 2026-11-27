@@ -4,6 +4,149 @@ set -euo pipefail
 
 fail() { printf 'pi-sbx: %s\n' "$*" >&2; exit 1; }
 
+KIT_REF="${SBX_PI_KIT:-git+https://github.com/gibenez/sbx-kits.git#dir=pi-dev}"
+
+# Orca's standalone catalog process runs in HOME with exactly these args for
+# an unadorned Pi Command. Never intercept workspace RPC or one-shot print.
+if [[ . -ef "$HOME" && $# == 3 && $1 == --mode && $2 == rpc && $3 == --no-session ]]; then
+  command -v python3 >/dev/null || fail 'python3 is required for the Orca model catalog'
+  # Keep stdin available for RPC. The installer distributes this single file.
+  exec python3 -c '
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+import time
+from urllib.parse import parse_qsl, quote
+
+MODEL_FILE = "files/home/.pi/agent/models.json"
+CACHE_TTL = 3600
+
+
+def project_models(entries):
+    models = []
+    seen = set()
+    for provider, row in entries:
+        model_id = row["id"]
+        if (not isinstance(provider, str) or not provider.strip() or "/" in provider
+                or not isinstance(model_id, str) or not model_id.strip()
+                or (provider, model_id) in seen):
+            raise ValueError("invalid or duplicate model")
+        seen.add((provider, model_id))
+        model = {"provider": provider, "id": model_id}
+        if isinstance(row.get("name"), str):
+            model["name"] = row["name"]
+        if isinstance(row.get("reasoning"), bool):
+            model["reasoning"] = row["reasoning"]
+        levels = row.get("thinkingLevelMap")
+        if isinstance(levels, dict):
+            model["thinkingLevelMap"] = {key: value for key, value in levels.items()
+                                         if value is None or isinstance(value, str)}
+        models.append(model)
+    if not models:
+        raise ValueError("empty catalog")
+    return models
+
+
+def read_config(config):
+    return project_models((provider, row)
+                          for provider, definition in config["providers"].items()
+                          for row in definition.get("models", []))
+
+
+def github_models_url(kit):
+    match = re.fullmatch(r"git\+https://github\.com/([\w.-]+)/([\w.-]+?)(?:\.git)?(?:#(.*))?", kit, re.ASCII)
+    if not match:
+        raise ValueError("not a GitHub kit")
+    owner, repo, fragment = match.groups()
+    pairs = parse_qsl(fragment or "", keep_blank_values=True, strict_parsing=True)
+    params = dict(pairs)
+    if len(params) != len(pairs) or params.keys() - {"ref", "dir"}:
+        raise ValueError("unsupported kit fragment")
+    # The published kit uses main. For other repos require an explicit ref.
+    revision = params.get("ref", "main" if (owner, repo) == ("gibenez", "sbx-kits") else "")
+    directory = params.get("dir", "")
+    paths = [owner, repo, revision] + ([directory] if directory else [])
+    if not all(re.fullmatch(r"[a-zA-Z0-9_.-]+", part) and part not in (".", "..")
+               for path in paths for part in path.split("/")):
+        raise ValueError("unsupported kit ref or path")
+    revision = quote(revision, safe="")
+    return (f"https://raw.githubusercontent.com/{owner}/{repo}/{revision}/"
+            + (directory + "/" if directory else "") + MODEL_FILE)
+
+
+def load_models(kit):
+    if Path(kit).is_dir():
+        return read_config(json.loads((Path(kit) / MODEL_FILE).read_bytes()))
+    url = github_models_url(kit)
+    root = Path(os.getenv("XDG_CACHE_HOME") or (Path.home() / ".cache")) / "pi-sbx" / "catalogs"
+    cache = root / (hashlib.sha256(url.encode()).hexdigest() + ".json")
+    cached = None
+    try:
+        rows = json.loads(cache.read_bytes())
+        cached = project_models((row["provider"], row) for row in rows)
+        if time.time() - cache.stat().st_mtime < CACHE_TTL:
+            return cached
+    except (OSError, ValueError, AttributeError, KeyError, TypeError):
+        pass
+    try:
+        result = subprocess.run(["curl", "-q", "-fsSL", "--proto", "=https", "--proto-redir", "=https",
+                                 "--connect-timeout", "2", "--max-time", "5", "--max-filesize", "1048576", url],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                check=True, timeout=6)
+        models = read_config(json.loads(result.stdout))
+    except (OSError, ValueError, AttributeError, KeyError, TypeError, subprocess.SubprocessError):
+        if cached is None:
+            raise
+        print("pi-sbx: catalog refresh failed; using cached models", file=sys.stderr)
+        return cached
+    try:
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(mode="w", dir=root, delete=False) as output:
+            temporary = Path(output.name)
+            try:
+                json.dump(models, output)
+                output.close()
+                temporary.replace(cache)
+            finally:
+                if temporary.exists():
+                    temporary.unlink()
+    except OSError:
+        pass  # A cache write failure must not discard a valid catalog.
+    return models
+
+
+catalog = None
+for line in sys.stdin:
+    try:
+        request = json.loads(line)
+    except ValueError:
+        continue
+    if not isinstance(request, dict) or not isinstance(request.get("type"), str):
+        continue
+    command = request["type"]
+    response = {"type": "response", "command": command, "success": True}
+    if "id" in request:
+        response["id"] = request["id"]
+    if command == "get_state":
+        response["data"] = {}
+    elif command == "get_available_models":
+        try:
+            if catalog is None:
+                catalog = load_models(sys.argv[1])
+            response["data"] = {"models": catalog}
+        except (OSError, ValueError, AttributeError, KeyError, TypeError, subprocess.SubprocessError):
+            response.update(success=False, error="pi-sbx: kit model catalog unavailable; check SBX_PI_KIT and GitHub connectivity")
+    else:
+        response.update(success=False, error="pi-sbx: catalog discovery only; no chat session")
+    print(json.dumps(response), flush=True)
+' "$KIT_REF"
+fi
+
 DIR_NAME="$(basename "$PWD" | tr -cs 'a-zA-Z0-9.-' '-' | sed 's/^-//;s/-$//')"
 SANDBOX_NAME="${SBX_PI_SANDBOX_NAME:-pi-${DIR_NAME:-workspace}}"
 [[ "$SANDBOX_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9]$ ]] || fail 'invalid sandbox name'
@@ -148,7 +291,7 @@ if (( ! EXISTS )); then
   # Keep the original macOS temporary-directory share when present.
   [[ ! -d /var/folders/_j ]] || WORKSPACES+=(/var/folders/_j)
   sbx run --no-input -d --name "$SANDBOX_NAME" \
-    "${SBX_PI_KIT:-git+https://github.com/gibenez/sbx-kits.git#dir=pi-dev}" \
+    "$KIT_REF" \
     --kit-arg "llmapi_domain=${SBX_PI_LLMAPI_DOMAIN:-your.llmapi.domain}" \
     "${WORKSPACES[@]}" </dev/null >/dev/null
   (umask 077

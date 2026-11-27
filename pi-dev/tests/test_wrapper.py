@@ -519,6 +519,51 @@ class WrapperTests(unittest.TestCase):
                     self.assertNotIn("--skill", final)
                     self.assertIn(flag, final)
 
+    def test_home_catalog_uses_kit_revision_and_cached_projected_models_without_sbx(self):
+        fixture = self.root / "models.json"
+        fixture.write_text(json.dumps({"providers": {"main": {
+            "apiKey": "placeholder", "baseUrl": "https://example.invalid", "models": [
+                {"id": "one", "name": "Model One", "reasoning": True,
+                 "thinkingLevelMap": {"max": "high"}, "headers": {"test": "private"}},
+                {"id": "org/two"},
+            ],
+        }}}))
+        url = "https://raw.githubusercontent.com/example/kit/v2/kit/files/home/.pi/agent/models.json"
+        curl = self.bin / "curl"
+        curl.write_text("#!/bin/sh\n"
+                        'for arg; do [ "$arg" != "$EXPECTED_URL" ] || exec /bin/cat "$MODELS_FIXTURE"; done\n'
+                        "exit 98\n")
+        requests = "".join(json.dumps({"type": command, "id": i}) + "\n"
+                           for i, command in enumerate(("get_state", "get_available_models", "prompt")))
+        env = dict(HOME=str(self.cwd), XDG_CACHE_HOME=str(self.root / "catalog-cache"),
+                   SBX_PI_KIT="git+https://github.com/example/kit.git#dir=kit&ref=v2",
+                   EXPECTED_URL=url, MODELS_FIXTURE=str(fixture))
+        for second_run in (False, True):
+            if second_run:
+                # An expired cache is still usable if the source now returns invalid JSON.
+                os.utime(next((self.root / "catalog-cache").rglob("*.json")), (1, 1))
+                fixture.write_text("not JSON")
+            result = self.run_wrapper("--mode", "rpc", "--no-session", stdin=requests, **env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            state, catalog, prompt = map(json.loads, result.stdout.splitlines())
+            self.assertEqual(state, {"type": "response", "id": 0, "command": "get_state",
+                                     "success": True, "data": {}})
+            self.assertEqual(catalog, {"type": "response", "id": 1, "command": "get_available_models",
+                                       "success": True, "data": {"models": [
+                                           {"id": "one", "provider": "main", "name": "Model One",
+                                            "reasoning": True, "thinkingLevelMap": {"max": "high"}},
+                                           {"id": "org/two", "provider": "main"},
+                                       ]}})
+            self.assertEqual(prompt["id"], 2)
+            self.assertFalse(prompt["success"])
+            self.assertEqual(self.calls(), [])
+
+    def test_workspace_sessionless_rpc_still_runs_real_pi(self):
+        result = self.run_wrapper("--mode", "rpc", "--no-session", stdin="workspace RPC\n", existing=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--no-session", self.launches()[-1])
+        self.assertEqual(result.stdout, "workspace RPC\n")
+
     def test_rpc_in_home_refuses_missing_sandbox_before_provisioning(self):
         result = self.run_wrapper("--mode", "rpc", HOME=str(self.cwd))
         self.assertNotEqual(result.returncode, 0)
