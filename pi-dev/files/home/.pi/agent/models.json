@@ -20,6 +20,13 @@
           "input": ["text", "image"]
         },
         {
+          "id": "Inkling-2-Mini-MLX-4-8bit",
+          "reasoning": true,
+          "contextWindow": 262144,
+          "maxTokens": 32768,
+          "input": ["text", "image"]
+        },
+        {
           "id": "gpt-6.2-sol",
           "reasoning": true,
           "contextWindow": 500000,
