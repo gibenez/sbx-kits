@@ -13,7 +13,7 @@
           "input": ["text", "image"]
         },
         {
-          "id": "Swift-1.5-Qwen3.8-27B-Q6_K_L",
+          "id": "Qwen3.8-27B-pi-adapted-MLX-8bit",
           "reasoning": true,
           "contextWindow": 262144,
           "maxTokens": 32768,
